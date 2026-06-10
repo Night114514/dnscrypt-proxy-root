@@ -1,0 +1,53 @@
+listen_addresses = ['127.0.0.1:5354']
+server_names = ['cloudflare', 'quad9-dnscrypt-ip4-filter-pri']
+max_clients = 250
+ipv4_servers = true
+ipv6_servers = false
+dnscrypt_servers = true
+doh_servers = true
+odoh_servers = false
+require_dnssec = true
+require_nolog = true
+require_nofilter = false
+force_tcp = false
+timeout = 5000
+keepalive = 30
+cert_refresh_delay = 240
+fallback_resolvers = ['9.9.9.9:53', '1.1.1.1:53']
+bootstrap_resolvers = ['9.9.9.9:53', '149.112.112.112:53', '1.1.1.1:53']
+ignore_system_dns = true
+netprobe_timeout = 60
+netprobe_address = '9.9.9.9:53'
+log_level = 2
+log_file = 'dnscrypt-proxy.log'
+use_syslog = false
+
+[query_log]
+  file = 'query.log'
+  format = 'tsv'
+
+[nx_log]
+  file = 'nx.log'
+  format = 'tsv'
+
+[blocked_names]
+  blocked_names_file = 'blocked-names.txt'
+
+[allowed_names]
+  allowed_names_file = 'allowed-names.txt'
+
+[blocked_ips]
+  blocked_ips_file = 'blocked-ips.txt'
+
+[allowed_ips]
+  allowed_ips_file = 'allowed-ips.txt'
+
+[sources]
+  [sources.'public-resolvers']
+  urls = ['https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/public-resolvers.md', 'https://download.dnscrypt.info/resolvers-list/v3/public-resolvers.md', 'https://cdn.jsdelivr.net/gh/DNSCrypt/dnscrypt-resolvers@master/v3/public-resolvers.md']
+  cache_file = 'public-resolvers.md'
+  minisign_key = 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3'
+  refresh_delay = 73
+  prefix = ''
+
+[static]
