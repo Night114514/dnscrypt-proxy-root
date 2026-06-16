@@ -1,9 +1,9 @@
 id=dnscrypt-proxy-root
 name=DNSCrypt Proxy Root WebUI
-version=0.1.0
-versionCode=100
+version=0.2.0
+versionCode=200
 author=Manus AI, DNSCrypt contributors, d3cim reference
 description=Systemless dnscrypt-proxy for Magisk/KernelSU/APatch with automatic upstream binary updates and KernelSU/APatch WebUI. Installed dnscrypt-proxy: 2.1.16.
-updateJson=https://github.com/Night114514/dnscrypt-proxy-root/releases/download/v0.1.0/update.json
+updateJson=https://github.com/Night114514/dnscrypt-proxy-root/releases/download/v0.2.0/update.json
 webuiIcon=webroot/icon.svg
 actionIcon=webroot/icon.svg

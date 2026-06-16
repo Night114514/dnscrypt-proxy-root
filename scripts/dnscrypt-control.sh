@@ -100,8 +100,19 @@ apply_iptables() {
     log_msg "$CONTROL_LOG" "iptables not found; DNS redirection skipped."
     return 1
   fi
+  # Get dnscrypt-proxy UID to exclude its own traffic from redirection (avoid loops)
+  PROXY_UID=""
+  if [ -f "$PID_FILE" ]; then
+    _pid=$(cat "$PID_FILE" 2>/dev/null)
+    [ -n "$_pid" ] && PROXY_UID=$(stat -c '%u' /proc/$_pid 2>/dev/null || id -u root 2>/dev/null)
+  fi
+  [ -z "$PROXY_UID" ] && PROXY_UID=0
+
   iptables -t nat -N "$CHAIN" >/dev/null 2>&1 || true
   iptables -t nat -F "$CHAIN" >/dev/null 2>&1 || true
+  # Exclude dnscrypt-proxy's own outbound DNS queries
+  iptables -t nat -A "$CHAIN" -m owner --uid-owner "$PROXY_UID" -j RETURN >/dev/null 2>&1 || true
+  # Exclude traffic destined for common resolvers used as bootstrap/fallback
   for ip in 127.0.0.1 0.0.0.0 9.9.9.9 149.112.112.112 1.1.1.1 1.0.0.1 8.8.8.8 8.8.4.4; do
     iptables -t nat -A "$CHAIN" -d "$ip" -j RETURN >/dev/null 2>&1 || true
   done
@@ -111,7 +122,7 @@ apply_iptables() {
   iptables -t nat -D OUTPUT -p tcp --dport 53 -j "$CHAIN" >/dev/null 2>&1 || true
   iptables -t nat -A OUTPUT -p udp --dport 53 -j "$CHAIN" >/dev/null 2>&1 || true
   iptables -t nat -A OUTPUT -p tcp --dport 53 -j "$CHAIN" >/dev/null 2>&1 || true
-  log_msg "$CONTROL_LOG" "Applied IPv4 DNS redirection to 127.0.0.1:$PORT."
+  log_msg "$CONTROL_LOG" "Applied IPv4 DNS redirection to 127.0.0.1:$PORT (exclude UID $PROXY_UID)."
 }
 
 remove_iptables() {
@@ -238,6 +249,34 @@ show_logs() {
   tail -n "$lines" "$CONFIG_DIR/dnscrypt-proxy.log" 2>/dev/null || true
 }
 
+query_stats() {
+  QUERY_LOG="$CONFIG_DIR/query.log"
+  if [ ! -f "$QUERY_LOG" ] || [ ! -s "$QUERY_LOG" ]; then
+    echo '{"totalQueries":0,"blockedCount":0,"blockRate":0,"uniqueDomains":0,"topDomains":[],"topBlocked":[],"timeline":[]}'
+    return 0
+  fi
+  # TSV format: timestamp client_ip domain query_type action latency
+  total=$(wc -l < "$QUERY_LOG" 2>/dev/null || echo 0)
+  blocked=$(grep -c 'REJECT\|BLOCK' "$QUERY_LOG" 2>/dev/null || echo 0)
+  if [ "$total" -gt 0 ]; then
+    rate=$(echo "scale=1; $blocked * 100 / $total" | bc 2>/dev/null || echo 0)
+  else
+    rate=0
+  fi
+  unique=$(awk -F'\t' '{print $3}' "$QUERY_LOG" 2>/dev/null | sort -u | wc -l || echo 0)
+  # Top domains
+  top_domains=$(awk -F'\t' '{print $3}' "$QUERY_LOG" 2>/dev/null | sort | uniq -c | sort -rn | head -5 | awk '{printf "{\"domain\":\"%s\",\"count\":%d},", $2, $1}')
+  top_domains="[${top_domains%,}]"
+  # Top blocked
+  top_blocked=$(grep 'REJECT\|BLOCK' "$QUERY_LOG" 2>/dev/null | awk -F'\t' '{print $3}' | sort | uniq -c | sort -rn | head -5 | awk '{printf "{\"domain\":\"%s\",\"count\":%d},", $2, $1}')
+  top_blocked="[${top_blocked%,}]"
+  # Timeline by hour
+  timeline=$(awk -F'\t' '{split($1,a,"[T ]"); split(a[2],b,":"); h=b[1]; total[h]++} /REJECT|BLOCK/{blocked[h]++} END{for(i=0;i<24;i++){hh=sprintf("%02d",i); printf "{\"hour\":\"%s\",\"queries\":%d,\"blocked\":%d},",hh,total[hh]+0,blocked[hh]+0}}' "$QUERY_LOG" 2>/dev/null)
+  timeline="[${timeline%,}]"
+  printf '{"totalQueries":%d,"blockedCount":%d,"blockRate":%s,"uniqueDomains":%d,"topDomains":%s,"topBlocked":%s,"timeline":%s}\n' \
+    "$total" "$blocked" "$rate" "$unique" "$top_domains" "$top_blocked" "$timeline"
+}
+
 case "$ACTION" in
   start) start_service ;;
   stop) stop_service ;;
@@ -251,8 +290,9 @@ case "$ACTION" in
   get-config) ensure_config; cat "$CONFIG_FILE" ;;
   save-config-b64) save_config_b64 "$@" ;;
   logs) show_logs "$@" ;;
+  query-stats) query_stats ;;
   *)
-    echo "Usage: $0 {start|stop|restart|status|apply-iptables|remove-iptables|update|check-update|auto-update|get-config|save-config-b64|logs}"
+    echo "Usage: $0 {start|stop|restart|status|apply-iptables|remove-iptables|update|check-update|auto-update|get-config|save-config-b64|logs|query-stats}"
     exit 1
     ;;
 esac

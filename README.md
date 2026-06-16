@@ -1,120 +1,145 @@
-# DNSCrypt Proxy Root Module
+# DNSCrypt Proxy Root WebUI Module
 
-A Magisk / KernelSU / APatch module that runs **dnscrypt-proxy** as a system-level encrypted DNS resolver on rooted Android devices. It features **automatic binary updates** from the official upstream releases and a built-in **WebUI** for configuration management.
+A systemless Magisk/KernelSU/APatch module that runs **dnscrypt-proxy** on rooted Android devices with:
 
----
-
-## Features
-
-- **Cross-Manager Compatibility** — Works with Magisk (v20.4+), KernelSU, and APatch.
-- **Automatic Updates** — On every boot, the module checks for new dnscrypt-proxy releases on GitHub and updates the binary in-place. Rate-limited to once per 24 hours.
-- **WebUI** — KernelSU and APatch managers display a built-in web interface for controlling the service, editing the TOML configuration, viewing logs, and triggering manual updates.
-- **iptables DNS Redirection** — Transparently redirects all device DNS traffic (port 53) to the local dnscrypt-proxy listener.
-- **Architecture Auto-Detection** — Supports arm64, arm, x86, and x86_64 devices.
-- **Action Button** — In managers that support it, the action button toggles the service on/off.
+- **Automatic binary updates** from upstream releases
+- **WebUI** for KernelSU/APatch managers (configuration, logs, statistics)
+- **Multi-language support** (English, 繁體中文, 简体中文)
+- **DNS query statistics** dashboard
+- **Blocklist/Allowlist** graphical management
+- **iptables-based DNS redirection** (all device DNS → dnscrypt-proxy)
+- **GitHub Actions CI/CD** for automatic module releases
 
 ---
 
 ## Installation
 
-1. Download the latest release ZIP from the [Releases](https://github.com/user/dnscrypt-proxy-root/releases) page.
-2. Flash via your root manager:
-   - **Magisk**: Modules → Install from storage → select ZIP
-   - **KernelSU**: Module → Install → select ZIP
-   - **APatch**: Module → Install → select ZIP
+1. Download the latest `dnscrypt-proxy-root-vX.X.X.zip` from [Releases](https://github.com/Night114514/dnscrypt-proxy-root/releases).
+2. Flash via **Magisk Manager**, **KernelSU Manager**, or **APatch Manager**.
 3. Reboot.
 
-On first install, the module will attempt to download the latest dnscrypt-proxy binary. An internet connection is required.
+The module will automatically download the correct dnscrypt-proxy binary for your device architecture during installation.
 
 ---
 
-## WebUI (KernelSU / APatch)
+## WebUI
 
-After installation, open the module's WebUI from the KernelSU or APatch manager. The interface provides:
+In **KernelSU** or **APatch** managers, tap the module's WebUI icon to access the configuration interface.
 
 | Tab | Function |
 |-----|----------|
-| **Overview** | Service status, PID, version, device info, start/stop/restart controls |
-| **Config** | Full TOML editor with save, validate, and restart integration |
-| **Logs** | Real-time log viewer with auto-refresh and color-coded severity |
-| **Update** | Version comparison, one-click update, auto-update status |
+| **Overview** | Service status, version info, quick start/stop/restart |
+| **Config** | Edit `dnscrypt-proxy.toml` with syntax highlighting |
+| **Blocklist** | Graphical domain blocklist/allowlist editor |
+| **Stats** | DNS query statistics (total queries, block rate, top domains, hourly timeline) |
+| **Logs** | Real-time service and query logs |
+| **Update** | Check and install upstream binary updates |
+
+The WebUI supports **English**, **繁體中文**, and **简体中文** with automatic detection based on system language.
+
+---
+
+## How It Works
+
+### DNS Redirection
+
+The module uses iptables NAT rules to redirect all outgoing DNS queries (port 53) to `127.0.0.1:5354` where dnscrypt-proxy listens. Bootstrap/fallback resolver IPs and the proxy's own UID are excluded to prevent loops.
+
+### Auto-Update (On-Device)
+
+On each boot, `service.sh` triggers a background update check:
+
+1. Queries the GitHub API for the latest dnscrypt-proxy release
+2. Compares with the currently installed version
+3. If newer, downloads the architecture-specific asset
+4. Extracts and atomically replaces the binary
+5. Updates module metadata
+
+The check is rate-limited to once per 24 hours (configurable via `DNSCRYPT_UPDATE_INTERVAL_SECONDS`).
+
+### CI/CD Auto-Update (GitHub Actions)
+
+A scheduled workflow runs every 6 hours:
+
+1. Checks upstream dnscrypt-proxy releases
+2. If a new version is detected, updates `module.prop` and `update.json`
+3. Builds a new module ZIP
+4. Creates a GitHub Release with the updated assets
+
+This enables Magisk's built-in module updater to notify users of new module versions.
+
+---
+
+## File Layout
+
+```
+dnscrypt-proxy-root/
+├── META-INF/                    # Magisk installer metadata
+├── .github/workflows/           # CI/CD automation
+│   ├── auto-update.yml          # Scheduled upstream check
+│   └── release.yml              # Tag-triggered release
+├── config/
+│   └── dnscrypt-proxy.toml      # Default configuration
+├── scripts/
+│   ├── common.sh                # Shared utilities
+│   ├── dnscrypt-control.sh      # Service control & WebUI API
+│   └── update-dnscrypt.sh       # Binary updater
+├── webroot/                     # WebUI static files
+│   ├── index.html
+│   ├── icon.svg
+│   └── assets/                  # JS/CSS bundles
+├── module.prop                  # Module metadata
+├── customize.sh                 # Installation script
+├── service.sh                   # Boot-time service start
+├── post-fs-data.sh              # Early iptables setup
+├── action.sh                    # Action button handler
+├── uninstall.sh                 # Cleanup on removal
+├── update.json                  # Magisk update descriptor
+└── skip_mount                   # Skip system overlay
+```
 
 ---
 
 ## Configuration
 
-The default configuration is stored at:
+The default configuration is at `<module_dir>/config/dnscrypt-proxy.toml`. Key settings:
 
-```
-/data/adb/modules/dnscrypt-proxy-root/config/dnscrypt-proxy.toml
-```
+- **listen_addresses**: `127.0.0.1:5354`
+- **server_names**: `cloudflare`, `quad9-dnscrypt-ip4-filter-pri`
+- **require_dnssec**: `true`
+- **require_nolog**: `true`
+- **query_log**: Enabled (TSV format, used by Stats page)
+- **blocked_names/allowed_names**: File-based filtering
 
-Key defaults:
-- Listen address: `127.0.0.1:5354`
-- Servers: `cloudflare`, `quad9-dnscrypt-ip4-filter-pri`
-- DNSSEC required: `true`
-- No-log required: `true`
-- IPv6: disabled (to avoid leaks on IPv4-only networks)
-
-You can edit this file via the WebUI or directly on the filesystem.
+Edit via the WebUI Config tab or manually with a text editor.
 
 ---
 
-## Auto-Update Mechanism
+## Supported Architectures
 
-The module checks for new upstream releases at:
-- Every device boot (after `sys.boot_completed`)
-- Manually via the WebUI "Update" tab
-- Via the action button (if configured)
-
-The update process:
-1. Queries the GitHub Releases API for the latest tag.
-2. Compares with the locally installed version.
-3. Downloads the architecture-appropriate release ZIP.
-4. Extracts and replaces the binary atomically (with backup).
-5. Restarts the service if it was running.
-
----
-
-## File Structure
-
-```
-/data/adb/modules/dnscrypt-proxy-root/
-├── META-INF/             # Magisk flashable ZIP metadata
-├── bin/                  # dnscrypt-proxy binary (auto-downloaded)
-├── config/               # TOML config + filter lists
-├── logs/                 # Service, update, and control logs
-├── run/                  # PID file, version tracking, update status
-├── scripts/
-│   ├── common.sh         # Shared utility functions
-│   ├── dnscrypt-control.sh  # Service control & WebUI API
-│   └── update-dnscrypt.sh   # Upstream binary updater
-├── webroot/              # WebUI static assets
-├── customize.sh          # Installation script
-├── post-fs-data.sh       # Early boot DNS redirection
-├── service.sh            # Late boot service start + auto-update
-├── action.sh             # Action button handler
-├── uninstall.sh          # Cleanup on removal
-├── module.prop           # Module metadata
-└── skip_mount            # Prevent systemless overlay (not needed)
-```
+| Architecture | Asset Name |
+|---|---|
+| arm64-v8a | `android_arm64` |
+| armeabi-v7a | `android_arm` |
+| x86_64 | `android_x86_64` |
+| x86 | `android_i386` |
 
 ---
 
 ## Troubleshooting
 
-- **Binary not downloaded**: Ensure internet is available. Check `logs/update.log`.
-- **DNS not working**: Verify iptables rules with `iptables -t nat -L OUTPUT`.
-- **Service won't start**: Check `logs/service.log` and `config/dnscrypt-proxy.log`.
-- **WebUI not showing**: Ensure you're using KernelSU v0.6.0+ or APatch with WebUI support.
+- **Binary not found**: Tap "Force Update" in WebUI or use the action button
+- **DNS not working**: Check if iptables rules are applied (Overview → status)
+- **Service won't start**: Check Logs tab for error messages
+- **WebUI not showing**: Ensure your manager supports WebUI (KernelSU 0.6.6+ / APatch)
 
 ---
 
 ## Credits
 
-- [dnscrypt-proxy](https://github.com/DNSCrypt/dnscrypt-proxy) by the DNSCrypt project
+- [dnscrypt-proxy](https://github.com/dnscrypt/dnscrypt-proxy) by Frank Denis
 - [dnscrypt-proxy-android](https://github.com/d3cim/dnscrypt-proxy-android) for reference
-- [KernelSU WebUI Module Template](https://github.com/pzqqt/ksu-webui-module-template) for WebUI integration patterns
+- [KernelSU](https://kernelsu.org) / [APatch](https://apatch.dev) for WebUI framework
 
 ---
 
