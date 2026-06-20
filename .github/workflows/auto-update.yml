@@ -2,8 +2,8 @@ name: Auto Update dnscrypt-proxy
 
 on:
   schedule:
-    # Check for upstream updates every 6 hours
-    - cron: '0 */6 * * *'
+    # Check for upstream updates every 1 month
+    - cron: '0 0 1 * *'
   workflow_dispatch:
     inputs:
       force_release:
