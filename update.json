@@ -1,6 +1,6 @@
 {
-  "version": "0.5.0",
-  "versionCode": 5,
-  "zipUrl": "https://github.com/Night114514/dnscrypt-proxy-root/releases/download/v0.5.0/dnscrypt-proxy-root-v0.5.0.zip",
-  "changelog": "https://github.com/Night114514/dnscrypt-proxy-root/releases/tag/v0.5.0"
+  "version": "v0.6.0",
+  "versionCode": 6,
+  "zipUrl": "https://github.com/Night114514/dnscrypt-proxy-root/releases/download/v0.6.0/dnscrypt-proxy-root-v0.6.0.zip",
+  "changelog": "https://github.com/Night114514/dnscrypt-proxy-root/releases/tag/v0.6.0"
 }

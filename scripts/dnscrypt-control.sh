@@ -438,7 +438,8 @@ protocol_status() {
   # Count active resolvers from log
   _active_resolvers=0
   if [ -f "$LOG_DIR/dnscrypt-proxy.log" ]; then
-    _active_resolvers=$(grep -c '\] OK' "$LOG_DIR/dnscrypt-proxy.log" 2>/dev/null || echo 0)
+    _active_resolvers=$(grep -c '\] OK' "$LOG_DIR/dnscrypt-proxy.log" 2>/dev/null)
+    _active_resolvers=${_active_resolvers:-0}
   fi
   printf '{"dnscrypt":%s,"doh":%s,"odoh":%s,"anonymized":%s,"running":%s,"quality":"%s","active_resolvers":%d}\n' \
     "$([ $_dnscrypt -gt 0 ] && echo true || echo false)" \
@@ -659,7 +660,8 @@ query_stats() {
   fi
   # TSV format: timestamp client_ip domain query_type action latency
   total=$(wc -l < "$QUERY_LOG" 2>/dev/null || echo 0)
-  blocked=$(grep -cE 'REJECT|BLOCK' "$QUERY_LOG" 2>/dev/null || echo 0)
+  blocked=$(grep -cE 'REJECT|BLOCK' "$QUERY_LOG" 2>/dev/null)
+  blocked=${blocked:-0}
   if [ "$total" -gt 0 ]; then
     rate=$(awk "BEGIN{if($total>0) printf \"%.1f\", $blocked*100/$total; else print \"0.0\"}")
   else
