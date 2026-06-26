@@ -21,8 +21,7 @@ if [ -f "$MODPATH/config/dnscrypt-proxy.toml" ]; then
   set_perm "$MODPATH/config/dnscrypt-proxy.toml" 0 0 0644
 fi
 
-ui_print "* Disabling Android Private DNS to avoid conflicts"
-settings put global private_dns_mode off >/dev/null 2>&1 || true
+ui_print "* Android Private DNS will be disabled after boot (handled by service.sh)"
 
 ui_print "* Downloading latest dnscrypt-proxy binary for this architecture"
 if sh "$MODPATH/scripts/update-dnscrypt.sh" install >/dev/null 2>&1; then

@@ -1,11 +1,12 @@
 #!/system/bin/sh
+set -u
 
 MODID="dnscrypt-proxy-root"
 UPSTREAM_API="https://api.github.com/repos/DNSCrypt/dnscrypt-proxy/releases/latest"
 UPSTREAM_RELEASE_BASE="https://github.com/DNSCrypt/dnscrypt-proxy/releases/download"
 DEFAULT_LISTEN="127.0.0.1:5354"
 
-if [ -z "$MODDIR" ]; then
+if [ -z "${MODDIR:-}" ]; then
   SCRIPT_DIR=${0%/*}
   MODDIR=$(cd "$SCRIPT_DIR/.." 2>/dev/null && pwd)
 fi
@@ -71,6 +72,15 @@ download_file() {
     return $?
   fi
   busybox_cmd wget -q -T 180 -O "$_out" "$_url"
+}
+
+sha256_of() {
+  _file="$1"
+  if has_cmd sha256sum; then
+    sha256sum "$_file" 2>/dev/null | awk '{print $1}'
+  else
+    busybox_cmd sha256sum "$_file" 2>/dev/null | awk '{print $1}'
+  fi
 }
 
 unzip_file() {
@@ -153,15 +163,34 @@ update_module_description() {
   _version="$1"
   _desc="Systemless dnscrypt-proxy for Magisk/KernelSU/APatch with automatic upstream binary updates and KernelSU/APatch WebUI. Installed dnscrypt-proxy: ${_version}."
   set_prop_value description "$_desc" "$MODDIR/module.prop"
-  if [ "$KSU" = "true" ] && has_cmd ksud; then
+  if [ "${KSU:-}" = "true" ] && has_cmd ksud; then
     ksud module config set override.description "$_desc" >/dev/null 2>&1 || true
   fi
 }
 
-is_dnscrypt_running() {
+# Resolve the running dnscrypt-proxy PID. PID file is authoritative; fall back to
+# scanning /proc because pgrep is not guaranteed on toybox-only Android shells.
+dnscrypt_pid() {
   if [ -f "$PID_FILE" ]; then
     _pid=$(cat "$PID_FILE" 2>/dev/null)
-    [ -n "$_pid" ] && kill -0 "$_pid" >/dev/null 2>&1 && return 0
+    if [ -n "$_pid" ] && [ -d "/proc/$_pid" ] && kill -0 "$_pid" >/dev/null 2>&1; then
+      echo "$_pid"
+      return 0
+    fi
   fi
-  pgrep -x dnscrypt-proxy >/dev/null 2>&1
+  for _cmdline in /proc/[0-9]*/cmdline; do
+    [ -r "$_cmdline" ] || continue
+    case "$(tr '\0' ' ' < "$_cmdline" 2>/dev/null)" in
+      *dnscrypt-proxy*)
+        _proc_dir=${_cmdline%/cmdline}
+        echo "${_proc_dir#/proc/}"
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+is_dnscrypt_running() {
+  dnscrypt_pid >/dev/null 2>&1
 }

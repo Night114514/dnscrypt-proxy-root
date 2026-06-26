@@ -1,4 +1,5 @@
 #!/system/bin/sh
+set -u
 
 SCRIPT_DIR=${0%/*}
 MODDIR=$(cd "$SCRIPT_DIR/.." 2>/dev/null && pwd)
@@ -107,6 +108,32 @@ if ! download_file "$ASSET_URL" "$ZIP_FILE"; then
   rm -rf "$WORK"
   echo "$msg"
   exit 1
+fi
+
+# Verify the downloaded archive against the upstream minisign-signed SHA256 list to
+# guard against supply-chain tampering. dnscrypt-proxy publishes a "minisign.txt"
+# alongside each release that lists "<sha256>  <filename>" entries.
+SHA_FILE="$WORK/minisign.txt"
+SHA_URL="$UPSTREAM_RELEASE_BASE/$LATEST_VERSION/minisign.txt"
+if download_file "$SHA_URL" "$SHA_FILE" && [ -s "$SHA_FILE" ]; then
+  ASSET_NAME="dnscrypt-proxy-${ARCH_ASSET}-${LATEST_VERSION}.zip"
+  EXPECTED_SHA=$(grep -F "$ASSET_NAME" "$SHA_FILE" 2>/dev/null | awk '{print $1}' | head -n 1)
+  ACTUAL_SHA=$(sha256_of "$ZIP_FILE")
+  if [ -n "$EXPECTED_SHA" ] && [ -n "$ACTUAL_SHA" ]; then
+    if [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
+      msg="SHA256 mismatch for $ASSET_NAME; expected $EXPECTED_SHA got $ACTUAL_SHA."
+      write_update_status "error" "$LATEST_VERSION" "$msg"
+      log_msg "$UPDATE_LOG" "$msg"
+      rm -rf "$WORK"
+      echo "$msg"
+      exit 1
+    fi
+    log_msg "$UPDATE_LOG" "SHA256 verified for $ASSET_NAME."
+  else
+    log_msg "$UPDATE_LOG" "SHA256 entry unavailable for $ASSET_NAME; skipping hash check."
+  fi
+else
+  log_msg "$UPDATE_LOG" "Could not fetch checksum list; skipping hash check."
 fi
 
 if ! unzip_file "$ZIP_FILE" "$EXTRACT_DIR"; then

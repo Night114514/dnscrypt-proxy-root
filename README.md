@@ -65,7 +65,7 @@ The check is rate-limited to once per 24 hours (configurable via `DNSCRYPT_UPDAT
 
 ### CI/CD Auto-Update (GitHub Actions)
 
-A scheduled workflow runs every 6 hours:
+A scheduled workflow runs monthly (on the 1st of each month, and on demand via `workflow_dispatch`):
 
 1. Checks upstream dnscrypt-proxy releases
 2. If a new version is detected, updates `module.prop` and `update.json`
