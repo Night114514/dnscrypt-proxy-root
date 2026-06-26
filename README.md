@@ -32,6 +32,8 @@ In **KernelSU** or **APatch** managers, tap the module's WebUI icon to access th
 | **Config** | Edit `dnscrypt-proxy.toml` with syntax highlighting |
 | **Blocklist** | Graphical domain blocklist/allowlist editor |
 | **Stats** | DNS query statistics (total queries, block rate, top domains, hourly timeline) |
+| **DNS Test** | Test domain resolution through dnscrypt-proxy vs direct DNS, compare latency |
+| **Resolvers** | Graphical DNS server selector with protocol/feature badges |
 | **Logs** | Real-time service and query logs |
 | **Update** | Check and install upstream binary updates |
 
@@ -43,7 +45,11 @@ The WebUI supports **English**, **繁體中文**, and **简体中文** with auto
 
 ### DNS Redirection
 
-The module uses iptables NAT rules to redirect all outgoing DNS queries (port 53) to `127.0.0.1:5354` where dnscrypt-proxy listens. Bootstrap/fallback resolver IPs and the proxy's own UID are excluded to prevent loops.
+The module uses iptables NAT rules to redirect all outgoing DNS queries (port 53) to `127.0.0.1:5354` where dnscrypt-proxy listens. The proxy's own UID is excluded to prevent loops, and loopback destinations (127.0.0.0/8) are also excluded since dnscrypt-proxy itself listens there.
+
+### skip_mount
+
+The `skip_mount` file is intentionally present because this module does **not** overlay any system partition files. All components (binary, config, webroot) reside within the module directory and operate as a standalone daemon with iptables redirection. Skipping the mount phase avoids unnecessary overhead.
 
 ### Auto-Update (On-Device)
 

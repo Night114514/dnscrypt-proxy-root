@@ -110,12 +110,10 @@ apply_iptables() {
 
   iptables -t nat -N "$CHAIN" >/dev/null 2>&1 || true
   iptables -t nat -F "$CHAIN" >/dev/null 2>&1 || true
-  # Exclude dnscrypt-proxy's own outbound DNS queries
+  # Exclude dnscrypt-proxy's own outbound DNS queries (prevents loops)
   iptables -t nat -A "$CHAIN" -m owner --uid-owner "$PROXY_UID" -j RETURN >/dev/null 2>&1 || true
-  # Exclude traffic destined for common resolvers used as bootstrap/fallback
-  for ip in 127.0.0.1 0.0.0.0 9.9.9.9 149.112.112.112 1.1.1.1 1.0.0.1 8.8.8.8 8.8.4.4; do
-    iptables -t nat -A "$CHAIN" -d "$ip" -j RETURN >/dev/null 2>&1 || true
-  done
+  # Exclude loopback destination (dnscrypt-proxy listens on 127.0.0.1)
+  iptables -t nat -A "$CHAIN" -d 127.0.0.0/8 -j RETURN >/dev/null 2>&1 || true
   iptables -t nat -A "$CHAIN" -p udp --dport 53 -j DNAT --to-destination "127.0.0.1:$PORT" >/dev/null 2>&1 || true
   iptables -t nat -A "$CHAIN" -p tcp --dport 53 -j DNAT --to-destination "127.0.0.1:$PORT" >/dev/null 2>&1 || true
   iptables -t nat -D OUTPUT -p udp --dport 53 -j "$CHAIN" >/dev/null 2>&1 || true
@@ -249,6 +247,73 @@ show_logs() {
   tail -n "$lines" "$CONFIG_DIR/dnscrypt-proxy.log" 2>/dev/null || true
 }
 
+dns_test() {
+  _domain="$2"
+  [ -z "$_domain" ] && { echo '{"error":"Missing domain argument"}'; return 1; }
+  PORT="5354"
+  # Test via dnscrypt-proxy local listener
+  if has_cmd nslookup; then
+    _result=$(nslookup "$_domain" 127.0.0.1 -port=$PORT 2>&1)
+  elif has_cmd dig; then
+    _result=$(dig @127.0.0.1 -p $PORT "$_domain" +short +time=5 2>&1)
+  elif has_cmd host; then
+    _result=$(host "$_domain" 127.0.0.1 2>&1)
+  else
+    _result="No DNS lookup tool available (nslookup/dig/host)"
+  fi
+  # Also test direct (bypass) for comparison
+  if has_cmd nslookup; then
+    _direct=$(nslookup "$_domain" 9.9.9.9 2>&1)
+  elif has_cmd dig; then
+    _direct=$(dig @9.9.9.9 "$_domain" +short +time=5 2>&1)
+  else
+    _direct="N/A"
+  fi
+  # Measure latency
+  _start=$(date +%s%N 2>/dev/null || date +%s)
+  if has_cmd nslookup; then
+    nslookup "$_domain" 127.0.0.1 -port=$PORT >/dev/null 2>&1
+  elif has_cmd dig; then
+    dig @127.0.0.1 -p $PORT "$_domain" +short +time=5 >/dev/null 2>&1
+  fi
+  _end=$(date +%s%N 2>/dev/null || date +%s)
+  if [ ${#_start} -gt 10 ]; then
+    _latency=$(( (_end - _start) / 1000000 ))
+  else
+    _latency=$(( _end - _start ))
+    _latency=$(( _latency * 1000 ))
+  fi
+  _result_escaped=$(printf '%s' "$_result" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' '|')
+  _direct_escaped=$(printf '%s' "$_direct" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' '|')
+  printf '{"domain":"%s","result":"%s","direct":"%s","latency_ms":%d,"server":"127.0.0.1:%d"}\n' \
+    "$_domain" "$_result_escaped" "$_direct_escaped" "$_latency" "$PORT"
+}
+
+list_resolvers() {
+  # Parse current server_names from config
+  ensure_config
+  _current=$(grep '^server_names' "$CONFIG_FILE" 2>/dev/null | sed "s/.*\[//;s/\].*//;s/'//g;s/\"//g;s/,/ /g" | tr -s ' ')
+  echo "$_current"
+}
+
+set_resolvers() {
+  # $2 = comma-separated list of resolver names
+  _resolvers="$2"
+  [ -z "$_resolvers" ] && { echo "Missing resolver list."; return 1; }
+  ensure_config
+  # Format as TOML array
+  _toml_list=$(printf '%s' "$_resolvers" | sed "s/,/', '/g")
+  _toml_line="server_names = ['${_toml_list}']"
+  # Replace in config
+  if grep -q '^server_names' "$CONFIG_FILE" 2>/dev/null; then
+    sed -i "s|^server_names.*|${_toml_line}|" "$CONFIG_FILE"
+  else
+    sed -i "1a\\${_toml_line}" "$CONFIG_FILE"
+  fi
+  log_msg "$CONTROL_LOG" "Resolvers updated: $_resolvers"
+  echo "Resolvers updated: $_resolvers"
+}
+
 query_stats() {
   QUERY_LOG="$CONFIG_DIR/query.log"
   if [ ! -f "$QUERY_LOG" ] || [ ! -s "$QUERY_LOG" ]; then
@@ -291,8 +356,11 @@ case "$ACTION" in
   save-config-b64) save_config_b64 "$@" ;;
   logs) show_logs "$@" ;;
   query-stats) query_stats ;;
+  dns-test) dns_test "$@" ;;
+  list-resolvers) list_resolvers ;;
+  set-resolvers) set_resolvers "$@" ;;
   *)
-    echo "Usage: $0 {start|stop|restart|status|apply-iptables|remove-iptables|update|check-update|auto-update|get-config|save-config-b64|logs|query-stats}"
+    echo "Usage: $0 {start|stop|restart|status|apply-iptables|remove-iptables|update|check-update|auto-update|get-config|save-config-b64|logs|query-stats|dns-test|list-resolvers|set-resolvers}"
     exit 1
     ;;
 esac
