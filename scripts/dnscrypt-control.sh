@@ -100,18 +100,21 @@ apply_iptables() {
     log_msg "$CONTROL_LOG" "iptables not found; DNS redirection skipped."
     return 1
   fi
-  # Get dnscrypt-proxy UID to exclude its own traffic from redirection (avoid loops)
-  PROXY_UID=""
-  if [ -f "$PID_FILE" ]; then
-    _pid=$(cat "$PID_FILE" 2>/dev/null)
-    [ -n "$_pid" ] && PROXY_UID=$(stat -c '%u' /proc/$_pid 2>/dev/null || id -u root 2>/dev/null)
-  fi
-  [ -z "$PROXY_UID" ] && PROXY_UID=0
+  # route_localnet must be enabled so the kernel does not drop packets DNAT'd to
+  # 127.0.0.1 from the OUTPUT chain.
+  sysctl -w net.ipv4.conf.all.route_localnet=1 2>/dev/null \
+    || echo 1 > /proc/sys/net/ipv4/conf/all/route_localnet 2>/dev/null || true
 
   iptables -t nat -N "$CHAIN" >/dev/null 2>&1 || true
   iptables -t nat -F "$CHAIN" >/dev/null 2>&1 || true
-  # Exclude dnscrypt-proxy's own outbound DNS queries (prevents loops)
-  iptables -t nat -A "$CHAIN" -m owner --uid-owner "$PROXY_UID" -j RETURN >/dev/null 2>&1 || true
+  # Exclude dnscrypt-proxy's own upstream DNS queries (DoH/DoT) by destination IP so
+  # they are not redirected back into the proxy. Using --uid-owner 0 here is wrong on
+  # Android because netd (the system DNS proxy) also runs as root, which would exclude
+  # all app DNS traffic.
+  for _upstream_ip in 1.1.1.1 1.0.0.1 9.9.9.9 149.112.112.112; do
+    iptables -t nat -A "$CHAIN" -d "$_upstream_ip" -p udp --dport 53 -j RETURN >/dev/null 2>&1 || true
+    iptables -t nat -A "$CHAIN" -d "$_upstream_ip" -p tcp --dport 53 -j RETURN >/dev/null 2>&1 || true
+  done
   # Exclude loopback destination (dnscrypt-proxy listens on 127.0.0.1)
   iptables -t nat -A "$CHAIN" -d 127.0.0.0/8 -j RETURN >/dev/null 2>&1 || true
   iptables -t nat -A "$CHAIN" -p udp --dport 53 -j DNAT --to-destination "127.0.0.1:$PORT" >/dev/null 2>&1 || true
@@ -120,7 +123,16 @@ apply_iptables() {
   iptables -t nat -D OUTPUT -p tcp --dport 53 -j "$CHAIN" >/dev/null 2>&1 || true
   iptables -t nat -A OUTPUT -p udp --dport 53 -j "$CHAIN" >/dev/null 2>&1 || true
   iptables -t nat -A OUTPUT -p tcp --dport 53 -j "$CHAIN" >/dev/null 2>&1 || true
-  log_msg "$CONTROL_LOG" "Applied IPv4 DNS redirection to 127.0.0.1:$PORT (exclude UID $PROXY_UID)."
+
+  # dnscrypt-proxy only listens on IPv4 (127.0.0.1:5354). Block IPv6 plaintext DNS
+  # so queries cannot leak unencrypted over IPv6.
+  if has_cmd ip6tables; then
+    ip6tables -t filter -I OUTPUT -p udp --dport 53 -j REJECT 2>/dev/null || true
+    ip6tables -t filter -I OUTPUT -p tcp --dport 53 -j REJECT 2>/dev/null || true
+    ip6tables -t filter -I INPUT -p udp --dport 53 -j REJECT 2>/dev/null || true
+  fi
+
+  log_msg "$CONTROL_LOG" "Applied IPv4 DNS redirection to 127.0.0.1:$PORT (IPv6 plaintext DNS blocked)."
 }
 
 remove_iptables() {
@@ -131,6 +143,14 @@ remove_iptables() {
     iptables -t nat -F "$CHAIN" >/dev/null 2>&1 || true
     iptables -t nat -X "$CHAIN" >/dev/null 2>&1 || true
   fi
+  if has_cmd ip6tables; then
+    ip6tables -t filter -D OUTPUT -p udp --dport 53 -j REJECT 2>/dev/null || true
+    ip6tables -t filter -D OUTPUT -p tcp --dport 53 -j REJECT 2>/dev/null || true
+    ip6tables -t filter -D INPUT -p udp --dport 53 -j REJECT 2>/dev/null || true
+  fi
+  # Reset route_localnet back to its default.
+  sysctl -w net.ipv4.conf.all.route_localnet=0 2>/dev/null \
+    || echo 0 > /proc/sys/net/ipv4/conf/all/route_localnet 2>/dev/null || true
   log_msg "$CONTROL_LOG" "Removed DNS redirection rules."
 }
 
@@ -250,6 +270,10 @@ show_logs() {
 dns_test() {
   _domain="$2"
   [ -z "$_domain" ] && { echo '{"error":"Missing domain argument"}'; return 1; }
+  # Reject anything that is not a valid domain to prevent command injection.
+  case "$_domain" in
+    *[!a-zA-Z0-9.\-]*) echo '{"error":"invalid domain"}'; return 1 ;;
+  esac
   PORT="5354"
   # Test via dnscrypt-proxy local listener
   if has_cmd nslookup; then
@@ -300,15 +324,26 @@ set_resolvers() {
   # $2 = comma-separated list of resolver names
   _resolvers="$2"
   [ -z "$_resolvers" ] && { echo "Missing resolver list."; return 1; }
+  # Validate each resolver name (comma separated) to prevent command/TOML injection.
+  _old_ifs="$IFS"
+  IFS=','
+  for _name in $_resolvers; do
+    case "$_name" in
+      ""|*[!a-zA-Z0-9._-]*) IFS="$_old_ifs"; echo "Invalid resolver name: $_name"; return 1 ;;
+    esac
+  done
+  IFS="$_old_ifs"
   ensure_config
   # Format as TOML array
   _toml_list=$(printf '%s' "$_resolvers" | sed "s/,/', '/g")
   _toml_line="server_names = ['${_toml_list}']"
-  # Replace in config
+  # Replace in config using awk to avoid sed special-character issues.
   if grep -q '^server_names' "$CONFIG_FILE" 2>/dev/null; then
-    sed -i "s|^server_names.*|${_toml_line}|" "$CONFIG_FILE"
+    awk -v line="$_toml_line" '/^server_names/ {print line; next} {print}' \
+      "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
   else
-    sed -i "1a\\${_toml_line}" "$CONFIG_FILE"
+    awk -v line="$_toml_line" 'NR==1 {print; print line; next} {print}' \
+      "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
   fi
   log_msg "$CONTROL_LOG" "Resolvers updated: $_resolvers"
   echo "Resolvers updated: $_resolvers"
@@ -318,6 +353,9 @@ ping_resolver() {
   # Ping a single resolver by name via dnscrypt-proxy's built-in resolver test
   _resolver="$2"
   [ -z "$_resolver" ] && { echo '{"name":"","latency_ms":-1,"error":"Missing resolver name"}'; return 1; }
+  case "$_resolver" in
+    *[!a-zA-Z0-9._-]*) echo '{"name":"","latency_ms":-1,"error":"invalid resolver name"}'; return 1 ;;
+  esac
   # Use nslookup through local proxy to measure latency
   _start=$(date +%s%N 2>/dev/null || date +%s)
   if has_cmd nslookup; then
@@ -597,9 +635,9 @@ query_stats() {
   fi
   # TSV format: timestamp client_ip domain query_type action latency
   total=$(wc -l < "$QUERY_LOG" 2>/dev/null || echo 0)
-  blocked=$(grep -c 'REJECT\|BLOCK' "$QUERY_LOG" 2>/dev/null || echo 0)
+  blocked=$(grep -cE 'REJECT|BLOCK' "$QUERY_LOG" 2>/dev/null || echo 0)
   if [ "$total" -gt 0 ]; then
-    rate=$(echo "scale=1; $blocked * 100 / $total" | bc 2>/dev/null || echo 0)
+    rate=$(awk "BEGIN{if($total>0) printf \"%.1f\", $blocked*100/$total; else print \"0.0\"}")
   else
     rate=0
   fi
@@ -608,7 +646,7 @@ query_stats() {
   top_domains=$(awk -F'\t' '{print $3}' "$QUERY_LOG" 2>/dev/null | sort | uniq -c | sort -rn | head -5 | awk '{printf "{\"domain\":\"%s\",\"count\":%d},", $2, $1}')
   top_domains="[${top_domains%,}]"
   # Top blocked
-  top_blocked=$(grep 'REJECT\|BLOCK' "$QUERY_LOG" 2>/dev/null | awk -F'\t' '{print $3}' | sort | uniq -c | sort -rn | head -5 | awk '{printf "{\"domain\":\"%s\",\"count\":%d},", $2, $1}')
+  top_blocked=$(grep -E 'REJECT|BLOCK' "$QUERY_LOG" 2>/dev/null | awk -F'\t' '{print $3}' | sort | uniq -c | sort -rn | head -5 | awk '{printf "{\"domain\":\"%s\",\"count\":%d},", $2, $1}')
   top_blocked="[${top_blocked%,}]"
   # Timeline by hour
   timeline=$(awk -F'\t' '{split($1,a,"[T ]"); split(a[2],b,":"); h=b[1]; total[h]++} /REJECT|BLOCK/{blocked[h]++} END{for(i=0;i<24;i++){hh=sprintf("%02d",i); printf "{\"hour\":\"%s\",\"queries\":%d,\"blocked\":%d},",hh,total[hh]+0,blocked[hh]+0}}' "$QUERY_LOG" 2>/dev/null)

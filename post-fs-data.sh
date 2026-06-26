@@ -1,6 +1,6 @@
 #!/system/bin/sh
 MODDIR=${0%/*}
 
-# Apply DNS redirection as early as possible. Failures are non-fatal because some
-# ROMs initialize iptables later; service.sh will try again after boot service starts.
-sh "$MODDIR/scripts/dnscrypt-control.sh" apply-iptables >/dev/null 2>&1 || true
+# iptables redirection is intentionally NOT applied here. Applying DNAT rules before
+# dnscrypt-proxy is listening creates a DNS blackhole during early boot. service.sh
+# applies the rules via start_service -> apply_iptables once the service is ready.
