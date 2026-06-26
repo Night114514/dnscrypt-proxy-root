@@ -361,6 +361,131 @@ ping_all_resolvers() {
   printf ']\n'
 }
 
+protocol_status() {
+  # Return JSON with current protocol configuration and connection quality
+  ensure_config
+  _dnscrypt=$(grep '^dnscrypt_servers' "$CONFIG_FILE" 2>/dev/null | grep -c 'true')
+  _doh=$(grep '^doh_servers' "$CONFIG_FILE" 2>/dev/null | grep -c 'true')
+  _odoh=$(grep '^odoh_servers' "$CONFIG_FILE" 2>/dev/null | grep -c 'true')
+  _anon="false"
+  if grep -q '^\[anonymized_dns\]' "$CONFIG_FILE" 2>/dev/null || grep -q '^routes' "$CONFIG_FILE" 2>/dev/null; then
+    _anon="true"
+  fi
+  _running="false"
+  is_dnscrypt_running && _running="true"
+  # Check connectivity by resolving a test domain
+  _quality="disconnected"
+  if [ "$_running" = "true" ]; then
+    if has_cmd nslookup; then
+      if nslookup dns.google 127.0.0.1 -port=5354 >/dev/null 2>&1; then
+        _quality="good"
+      else
+        _quality="degraded"
+      fi
+    elif has_cmd dig; then
+      if dig @127.0.0.1 -p 5354 dns.google +short +time=3 >/dev/null 2>&1; then
+        _quality="good"
+      else
+        _quality="degraded"
+      fi
+    fi
+  fi
+  # Count active resolvers from log
+  _active_resolvers=0
+  if [ -f "$LOG_DIR/dnscrypt-proxy.log" ]; then
+    _active_resolvers=$(grep -c '\] OK' "$LOG_DIR/dnscrypt-proxy.log" 2>/dev/null || echo 0)
+  fi
+  printf '{"dnscrypt":%s,"doh":%s,"odoh":%s,"anonymized":%s,"running":%s,"quality":"%s","active_resolvers":%d}\n' \
+    "$([ $_dnscrypt -gt 0 ] && echo true || echo false)" \
+    "$([ $_doh -gt 0 ] && echo true || echo false)" \
+    "$([ $_odoh -gt 0 ] && echo true || echo false)" \
+    "$_anon" "$_running" "$_quality" "$_active_resolvers"
+}
+
+quick_mode() {
+  # Apply a preset configuration mode
+  # $2 = mode name: fastest | privacy | family
+  _mode="$2"
+  [ -z "$_mode" ] && { echo "Missing mode name. Use: fastest|privacy|family"; return 1; }
+  ensure_config
+  case "$_mode" in
+    fastest)
+      # Fastest: Use DoH servers known for low latency, disable anonymization
+      sed -i "s|^server_names.*|server_names = ['cloudflare', 'google', 'nextdns', 'cloudflare-ipv6']|" "$CONFIG_FILE"
+      sed -i "s|^dnscrypt_servers.*|dnscrypt_servers = true|" "$CONFIG_FILE"
+      sed -i "s|^doh_servers.*|doh_servers = true|" "$CONFIG_FILE"
+      sed -i "s|^odoh_servers.*|odoh_servers = false|" "$CONFIG_FILE"
+      sed -i "s|^require_dnssec.*|require_dnssec = false|" "$CONFIG_FILE"
+      sed -i "s|^require_nolog.*|require_nolog = false|" "$CONFIG_FILE"
+      sed -i "s|^require_nofilter.*|require_nofilter = true|" "$CONFIG_FILE"
+      # Remove anonymized_dns section if present
+      sed -i '/^\[anonymized_dns\]/,/^\[/{ /^\[anonymized_dns\]/d; /^\[/!d; }' "$CONFIG_FILE"
+      echo "Applied mode: fastest (low latency, no filtering)"
+      ;;
+    privacy)
+      # Privacy: Anonymized DNSCrypt with no-log resolvers
+      sed -i "s|^server_names.*|server_names = ['quad9-dnscrypt-ip4-filter-pri', 'scaleway-fr', 'lelux.fi', 'pf-dnscrypt']|" "$CONFIG_FILE"
+      sed -i "s|^dnscrypt_servers.*|dnscrypt_servers = true|" "$CONFIG_FILE"
+      sed -i "s|^doh_servers.*|doh_servers = false|" "$CONFIG_FILE"
+      sed -i "s|^odoh_servers.*|odoh_servers = false|" "$CONFIG_FILE"
+      sed -i "s|^require_dnssec.*|require_dnssec = true|" "$CONFIG_FILE"
+      sed -i "s|^require_nolog.*|require_nolog = true|" "$CONFIG_FILE"
+      sed -i "s|^require_nofilter.*|require_nofilter = false|" "$CONFIG_FILE"
+      # Enable anonymized DNS routes
+      if ! grep -q '^\[anonymized_dns\]' "$CONFIG_FILE" 2>/dev/null; then
+        cat >> "$CONFIG_FILE" <<'ANON'
+
+[anonymized_dns]
+  routes = [
+    { server_name = '*', via = ['anon-cs-fr', 'anon-cs-de', 'anon-tiarap', 'anon-kama'] }
+  ]
+ANON
+      fi
+      echo "Applied mode: privacy (anonymized DNSCrypt, no-log, DNSSEC)"
+      ;;
+    family)
+      # Family: Filtered resolvers that block adult content + malware
+      sed -i "s|^server_names.*|server_names = ['cloudflare-family', 'adguard-dns-family', 'cleanbrowsing-family']|" "$CONFIG_FILE"
+      sed -i "s|^dnscrypt_servers.*|dnscrypt_servers = true|" "$CONFIG_FILE"
+      sed -i "s|^doh_servers.*|doh_servers = true|" "$CONFIG_FILE"
+      sed -i "s|^odoh_servers.*|odoh_servers = false|" "$CONFIG_FILE"
+      sed -i "s|^require_dnssec.*|require_dnssec = true|" "$CONFIG_FILE"
+      sed -i "s|^require_nolog.*|require_nolog = true|" "$CONFIG_FILE"
+      sed -i "s|^require_nofilter.*|require_nofilter = false|" "$CONFIG_FILE"
+      # Remove anonymized_dns section if present
+      sed -i '/^\[anonymized_dns\]/,/^\[/{ /^\[anonymized_dns\]/d; /^\[/!d; }' "$CONFIG_FILE"
+      echo "Applied mode: family (family-safe filtering, DNSSEC)"
+      ;;
+    *)
+      echo "Unknown mode: $_mode. Use: fastest|privacy|family"
+      return 1
+      ;;
+  esac
+  # Restart service if running
+  if is_dnscrypt_running; then
+    restart_service
+  fi
+}
+
+get_current_mode() {
+  # Detect current mode based on config settings
+  ensure_config
+  _servers=$(grep '^server_names' "$CONFIG_FILE" 2>/dev/null || echo "")
+  _anon="false"
+  grep -q '^\[anonymized_dns\]' "$CONFIG_FILE" 2>/dev/null && _anon="true"
+  _nofilter=$(grep '^require_nofilter' "$CONFIG_FILE" 2>/dev/null | grep -c 'true')
+  
+  if [ "$_anon" = "true" ]; then
+    echo "privacy"
+  elif echo "$_servers" | grep -q 'family\|cleanbrowsing'; then
+    echo "family"
+  elif [ "$_nofilter" -gt 0 ]; then
+    echo "fastest"
+  else
+    echo "custom"
+  fi
+}
+
 export_config() {
   # Export full config as JSON (config + blocklists + resolver selection)
   ensure_config
@@ -511,13 +636,16 @@ case "$ACTION" in
   set-resolvers) set_resolvers "$@" ;;
   ping-resolver) ping_resolver "$@" ;;
   ping-all) ping_all_resolvers ;;
+  protocol-status) protocol_status ;;
+  quick-mode) quick_mode "$@" ;;
+  get-mode) get_current_mode ;;
   export-config) export_config ;;
   import-config-b64) import_config_b64 "$@" ;;
   get-subscriptions) get_subscriptions ;;
   save-subscriptions-b64) save_subscriptions_b64 "$@" ;;
   apply-subscriptions) apply_subscriptions ;;
   *)
-    echo "Usage: $0 {start|stop|restart|status|apply-iptables|remove-iptables|update|check-update|auto-update|get-config|save-config-b64|logs|query-stats|dns-test|list-resolvers|set-resolvers|ping-resolver|ping-all|export-config|import-config-b64|get-subscriptions|save-subscriptions-b64|apply-subscriptions}"
+    echo "Usage: $0 {start|stop|restart|status|apply-iptables|remove-iptables|update|check-update|auto-update|get-config|save-config-b64|logs|query-stats|dns-test|list-resolvers|set-resolvers|ping-resolver|ping-all|protocol-status|quick-mode|get-mode|export-config|import-config-b64|get-subscriptions|save-subscriptions-b64|apply-subscriptions}"
     exit 1
     ;;
 esac
