@@ -13,5 +13,9 @@ done
   sh "$MODDIR/scripts/dnscrypt-control.sh" auto-update >/dev/null 2>&1 || true
 ) &
 
+# Disable Android Private DNS now that the framework is ready; running this during
+# installation (customize.sh) is unreliable because settings/framework is not up yet.
+settings put global private_dns_mode off >/dev/null 2>&1 || true
+
 # Start service and re-apply DNS redirection.
 sh "$MODDIR/scripts/dnscrypt-control.sh" start >/dev/null 2>&1 || true

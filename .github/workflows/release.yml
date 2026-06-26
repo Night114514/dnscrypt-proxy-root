@@ -10,6 +10,9 @@ permissions:
 
 jobs:
   release:
+    # Skip tags pushed by the auto-update workflow's bot to avoid a duplicate release
+    # (auto-update.yml already publishes the release for those tags).
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository

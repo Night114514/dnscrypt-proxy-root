@@ -1,4 +1,5 @@
 #!/system/bin/sh
+set -u
 
 SCRIPT_DIR=${0%/*}
 MODDIR=$(cd "$SCRIPT_DIR/.." 2>/dev/null && pwd)
@@ -6,14 +7,33 @@ MODDIR=$(cd "$SCRIPT_DIR/.." 2>/dev/null && pwd)
 
 ACTION="${1:-status}"
 
+# Millisecond timestamp. toybox's date lacks %N and echoes the literal "%N",
+# so fall back to second precision when nanoseconds are unavailable.
+_now_ms() {
+  _ts=$(date +%s%N 2>/dev/null)
+  case "$_ts" in
+    *[!0-9]*|"") echo "$(( $(date +%s 2>/dev/null || echo 0) * 1000 ))" ;;
+    *) echo "$(( _ts / 1000000 ))" ;;
+  esac
+}
+
 shell_quote_json() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\r//g' | tr '\n' ' '
 }
 
+# Keep only the 5 most recent config backups so they cannot grow unbounded.
+prune_config_backups() {
+  for _pat in "$CONFIG_FILE".*.bak "$CONFIG_FILE".bak.*; do
+    ls -t $_pat 2>/dev/null | tail -n +6 | while IFS= read -r _old; do
+      [ -n "$_old" ] && rm -f "$_old"
+    done
+  done
+}
+
 manager_name() {
-  if [ "$APATCH" = "true" ] || [ -d /data/adb/ap ]; then
+  if [ "${APATCH:-}" = "true" ] || [ -d /data/adb/ap ]; then
     echo "APatch"
-  elif [ "$KSU" = "true" ] || [ -d /data/adb/ksu ]; then
+  elif [ "${KSU:-}" = "true" ] || [ -d /data/adb/ksu ]; then
     echo "KernelSU"
   elif [ -d /data/adb/magisk ]; then
     echo "Magisk"
@@ -179,14 +199,16 @@ start_service() {
 }
 
 stop_service() {
-  if [ -f "$PID_FILE" ]; then
-    pid=$(cat "$PID_FILE" 2>/dev/null)
-    [ -n "$pid" ] && kill "$pid" >/dev/null 2>&1 || true
+  pid=$(dnscrypt_pid 2>/dev/null || true)
+  if [ -n "$pid" ]; then
+    kill "$pid" >/dev/null 2>&1 || true
     sleep 1
-    [ -n "$pid" ] && kill -9 "$pid" >/dev/null 2>&1 || true
-    rm -f "$PID_FILE"
+    kill -0 "$pid" >/dev/null 2>&1 && kill -9 "$pid" >/dev/null 2>&1 || true
+  else
+    # Fallback for environments without a PID file; tolerate pkill lacking -x.
+    pkill -x dnscrypt-proxy >/dev/null 2>&1 || pkill dnscrypt-proxy >/dev/null 2>&1 || true
   fi
-  pkill -x dnscrypt-proxy >/dev/null 2>&1 || true
+  rm -f "$PID_FILE"
   remove_iptables >/dev/null 2>&1 || true
   log_msg "$SERVICE_LOG" "dnscrypt-proxy stopped."
   echo "dnscrypt-proxy stopped."
@@ -200,11 +222,8 @@ restart_service() {
 print_status() {
   running="false"
   pid=""
-  if is_dnscrypt_running; then
-    running="true"
-    if [ -f "$PID_FILE" ]; then pid=$(cat "$PID_FILE" 2>/dev/null); fi
-    [ -z "$pid" ] && pid=$(pgrep -x dnscrypt-proxy 2>/dev/null | head -n 1)
-  fi
+  pid=$(dnscrypt_pid 2>/dev/null || true)
+  [ -n "$pid" ] && running="true"
   version=$(installed_version)
   manager=$(manager_name)
   update_state="unknown"
@@ -220,7 +239,7 @@ print_status() {
 }
 
 save_config_b64() {
-  payload="$2"
+  payload="${2:-}"
   [ -n "$payload" ] || {
     echo "Missing base64 payload."
     return 1
@@ -249,6 +268,7 @@ save_config_b64() {
     }
   fi
   cp -af "$CONFIG_FILE" "$backup" 2>/dev/null || true
+  prune_config_backups
   mv -f "$tmp" "$CONFIG_FILE"
   chmod 0644 "$CONFIG_FILE" 2>/dev/null || true
   log_msg "$CONTROL_LOG" "Configuration saved; backup: $backup"
@@ -268,7 +288,7 @@ show_logs() {
 }
 
 dns_test() {
-  _domain="$2"
+  _domain="${2:-}"
   [ -z "$_domain" ] && { echo '{"error":"Missing domain argument"}'; return 1; }
   # Reject anything that is not a valid domain to prevent command injection.
   case "$_domain" in
@@ -294,19 +314,14 @@ dns_test() {
     _direct="N/A"
   fi
   # Measure latency
-  _start=$(date +%s%N 2>/dev/null || date +%s)
+  _start=$(_now_ms)
   if has_cmd nslookup; then
     nslookup "$_domain" 127.0.0.1 -port=$PORT >/dev/null 2>&1
   elif has_cmd dig; then
     dig @127.0.0.1 -p $PORT "$_domain" +short +time=5 >/dev/null 2>&1
   fi
-  _end=$(date +%s%N 2>/dev/null || date +%s)
-  if [ ${#_start} -gt 10 ]; then
-    _latency=$(( (_end - _start) / 1000000 ))
-  else
-    _latency=$(( _end - _start ))
-    _latency=$(( _latency * 1000 ))
-  fi
+  _end=$(_now_ms)
+  _latency=$(( _end - _start ))
   _result_escaped=$(printf '%s' "$_result" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' '|')
   _direct_escaped=$(printf '%s' "$_direct" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' '|')
   printf '{"domain":"%s","result":"%s","direct":"%s","latency_ms":%d,"server":"127.0.0.1:%d"}\n' \
@@ -322,7 +337,7 @@ list_resolvers() {
 
 set_resolvers() {
   # $2 = comma-separated list of resolver names
-  _resolvers="$2"
+  _resolvers="${2:-}"
   [ -z "$_resolvers" ] && { echo "Missing resolver list."; return 1; }
   # Validate each resolver name (comma separated) to prevent command/TOML injection.
   _old_ifs="$IFS"
@@ -351,24 +366,20 @@ set_resolvers() {
 
 ping_resolver() {
   # Ping a single resolver by name via dnscrypt-proxy's built-in resolver test
-  _resolver="$2"
+  _resolver="${2:-}"
   [ -z "$_resolver" ] && { echo '{"name":"","latency_ms":-1,"error":"Missing resolver name"}'; return 1; }
   case "$_resolver" in
     *[!a-zA-Z0-9._-]*) echo '{"name":"","latency_ms":-1,"error":"invalid resolver name"}'; return 1 ;;
   esac
   # Use nslookup through local proxy to measure latency
-  _start=$(date +%s%N 2>/dev/null || date +%s)
+  _start=$(_now_ms)
   if has_cmd nslookup; then
     nslookup "dns.google" 127.0.0.1 -port=5354 >/dev/null 2>&1
   elif has_cmd dig; then
     dig @127.0.0.1 -p 5354 "dns.google" +short +time=3 >/dev/null 2>&1
   fi
-  _end=$(date +%s%N 2>/dev/null || date +%s)
-  if [ ${#_start} -gt 10 ]; then
-    _latency=$(( (_end - _start) / 1000000 ))
-  else
-    _latency=$(( (_end - _start) * 1000 ))
-  fi
+  _end=$(_now_ms)
+  _latency=$(( _end - _start ))
   printf '{"name":"%s","latency_ms":%d}\n' "$_resolver" "$_latency"
 }
 
@@ -380,18 +391,14 @@ ping_all_resolvers() {
   _first=1
   for _r in $_resolvers; do
     [ -z "$_r" ] && continue
-    _start=$(date +%s%N 2>/dev/null || date +%s)
+    _start=$(_now_ms)
     if has_cmd nslookup; then
       nslookup "dns.google" 127.0.0.1 -port=5354 >/dev/null 2>&1
     elif has_cmd dig; then
       dig @127.0.0.1 -p 5354 "dns.google" +short +time=3 >/dev/null 2>&1
     fi
-    _end=$(date +%s%N 2>/dev/null || date +%s)
-    if [ ${#_start} -gt 10 ]; then
-      _latency=$(( (_end - _start) / 1000000 ))
-    else
-      _latency=$(( (_end - _start) * 1000 ))
-    fi
+    _end=$(_now_ms)
+    _latency=$(( _end - _start ))
     [ $_first -eq 0 ] && printf ','
     printf '{"name":"%s","latency_ms":%d}' "$_r" "$_latency"
     _first=0
@@ -443,7 +450,7 @@ protocol_status() {
 quick_mode() {
   # Apply a preset configuration mode
   # $2 = mode name: fastest | privacy | family
-  _mode="$2"
+  _mode="${2:-}"
   [ -z "$_mode" ] && { echo "Missing mode name. Use: fastest|privacy|family"; return 1; }
   ensure_config
   case "$_mode" in
@@ -548,7 +555,7 @@ export_config() {
 
 import_config_b64() {
   # Import config from base64-encoded JSON
-  _data_b64="$2"
+  _data_b64="${2:-}"
   [ -z "$_data_b64" ] && { echo "Missing import data."; return 1; }
   _json=$(printf '%s' "$_data_b64" | base64 -d 2>/dev/null)
   [ -z "$_json" ] && { echo "Failed to decode import data."; return 1; }
@@ -556,6 +563,7 @@ import_config_b64() {
   # Backup current
   _ts=$(date +%Y%m%d_%H%M%S)
   cp "$CONFIG_FILE" "$CONFIG_FILE.bak.$_ts" 2>/dev/null
+  prune_config_backups
   # Extract and write each part
   _cfg=$(printf '%s' "$_json" | sed 's/.*"config":"\([^"]*\)".*/\1/' | base64 -d 2>/dev/null)
   [ -n "$_cfg" ] && printf '%s' "$_cfg" > "$CONFIG_FILE"
@@ -585,7 +593,7 @@ get_subscriptions() {
 
 save_subscriptions_b64() {
   # Save subscriptions from base64 input
-  _data_b64="$2"
+  _data_b64="${2:-}"
   [ -z "$_data_b64" ] && { echo "Missing data."; return 1; }
   ensure_config
   printf '%s' "$_data_b64" | base64 -d > "$CONFIG_DIR/subscriptions.json" 2>/dev/null
@@ -604,19 +612,35 @@ apply_subscriptions() {
   # Start fresh
   printf '%s\n' "$_user_entries" > "$_merged.tmp"
   printf '## Auto-generated from subscriptions on %s\n' "$(date +%Y-%m-%d)" >> "$_merged.tmp"
-  # For each enabled subscription URL, download and append
-  # Simple JSON parsing: extract url fields from enabled entries
-  _urls=$(grep -o '"url":"[^"]*"' "$_subs_file" | sed 's/"url":"//;s/"//' || true)
-  _enabled_list=$(grep -o '"enabled":[a-z]*' "$_subs_file" | sed 's/"enabled"://' || true)
+  # Parse JSON object-by-object so url/enabled always come from the same entry,
+  # regardless of field order. Uses RS/RSTART/RLENGTH only, which busybox awk
+  # supports (the 3-argument match() capture form does not exist there).
+  _pairs=$(awk '
+    BEGIN { RS="}" }
+    {
+      url=""; enabled="false"
+      if (match($0, /"url"[ \t]*:[ \t]*"[^"]*"/)) {
+        s = substr($0, RSTART, RLENGTH)
+        sub(/^"url"[ \t]*:[ \t]*"/, "", s)
+        sub(/"$/, "", s)
+        url = s
+      }
+      if ($0 ~ /"enabled"[ \t]*:[ \t]*true/) enabled="true"
+      if (url != "") print url "|" enabled
+    }
+  ' "$_subs_file")
   _i=0
-  echo "$_urls" | while IFS= read -r _url; do
+  printf '%s\n' "$_pairs" | while IFS='|' read -r _url _en; do
+    [ "$_en" = "true" ] || continue
+    [ -n "$_url" ] || continue
+    # Only allow URLs built from safe characters to prevent command/option injection.
+    case "$_url" in
+      *[!a-zA-Z0-9:/._?=\&%~-]*) log_msg "$CONTROL_LOG" "Skipping unsafe subscription URL."; continue ;;
+    esac
     _i=$((_i + 1))
-    _en=$(echo "$_enabled_list" | sed -n "${_i}p")
-    [ "$_en" != "true" ] && continue
-    [ -z "$_url" ] && continue
     printf '# subscription-%d: %s\n' "$_i" "$_url" >> "$_merged.tmp"
     if has_cmd curl; then
-      curl -fsSL --connect-timeout 10 "$_url" 2>/dev/null | grep -v '^#' | grep -v '^$' | grep -v '^!' >> "$_merged.tmp" || true
+      curl -fsSL --connect-timeout 10 --max-filesize 10485760 "$_url" 2>/dev/null | grep -v '^#' | grep -v '^$' | grep -v '^!' >> "$_merged.tmp" || true
     elif has_cmd wget; then
       wget -qO- --timeout=10 "$_url" 2>/dev/null | grep -v '^#' | grep -v '^$' | grep -v '^!' >> "$_merged.tmp" || true
     fi
