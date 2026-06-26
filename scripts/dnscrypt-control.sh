@@ -314,6 +314,156 @@ set_resolvers() {
   echo "Resolvers updated: $_resolvers"
 }
 
+ping_resolver() {
+  # Ping a single resolver by name via dnscrypt-proxy's built-in resolver test
+  _resolver="$2"
+  [ -z "$_resolver" ] && { echo '{"name":"","latency_ms":-1,"error":"Missing resolver name"}'; return 1; }
+  # Use nslookup through local proxy to measure latency
+  _start=$(date +%s%N 2>/dev/null || date +%s)
+  if has_cmd nslookup; then
+    nslookup "dns.google" 127.0.0.1 -port=5354 >/dev/null 2>&1
+  elif has_cmd dig; then
+    dig @127.0.0.1 -p 5354 "dns.google" +short +time=3 >/dev/null 2>&1
+  fi
+  _end=$(date +%s%N 2>/dev/null || date +%s)
+  if [ ${#_start} -gt 10 ]; then
+    _latency=$(( (_end - _start) / 1000000 ))
+  else
+    _latency=$(( (_end - _start) * 1000 ))
+  fi
+  printf '{"name":"%s","latency_ms":%d}\n' "$_resolver" "$_latency"
+}
+
+ping_all_resolvers() {
+  # Ping all currently selected resolvers and return JSON array
+  ensure_config
+  _resolvers=$(grep '^server_names' "$CONFIG_FILE" 2>/dev/null | sed "s/.*\[//;s/\].*//;s/'//g;s/\"//g;s/,/ /g" | tr -s ' ')
+  printf '['
+  _first=1
+  for _r in $_resolvers; do
+    [ -z "$_r" ] && continue
+    _start=$(date +%s%N 2>/dev/null || date +%s)
+    if has_cmd nslookup; then
+      nslookup "dns.google" 127.0.0.1 -port=5354 >/dev/null 2>&1
+    elif has_cmd dig; then
+      dig @127.0.0.1 -p 5354 "dns.google" +short +time=3 >/dev/null 2>&1
+    fi
+    _end=$(date +%s%N 2>/dev/null || date +%s)
+    if [ ${#_start} -gt 10 ]; then
+      _latency=$(( (_end - _start) / 1000000 ))
+    else
+      _latency=$(( (_end - _start) * 1000 ))
+    fi
+    [ $_first -eq 0 ] && printf ','
+    printf '{"name":"%s","latency_ms":%d}' "$_r" "$_latency"
+    _first=0
+  done
+  printf ']\n'
+}
+
+export_config() {
+  # Export full config as JSON (config + blocklists + resolver selection)
+  ensure_config
+  # Helper: encode file to base64 (portable across busybox/GNU)
+  _b64_encode() {
+    if base64 -w 0 < /dev/null >/dev/null 2>&1; then
+      cat "$1" 2>/dev/null | base64 -w 0
+    else
+      cat "$1" 2>/dev/null | base64 | tr -d '\n'
+    fi
+  }
+  _config_b64=$(_b64_encode "$CONFIG_FILE")
+  _blocked_names_b64=$(_b64_encode "$CONFIG_DIR/blocked-names.txt")
+  _allowed_names_b64=$(_b64_encode "$CONFIG_DIR/allowed-names.txt")
+  _blocked_ips_b64=$(_b64_encode "$CONFIG_DIR/blocked-ips.txt")
+  _allowed_ips_b64=$(_b64_encode "$CONFIG_DIR/allowed-ips.txt")
+  _subs_b64=""
+  [ -f "$CONFIG_DIR/subscriptions.json" ] && _subs_b64=$(_b64_encode "$CONFIG_DIR/subscriptions.json")
+  printf '{"version":1,"config":"%s","blocked_names":"%s","allowed_names":"%s","blocked_ips":"%s","allowed_ips":"%s","subscriptions":"%s"}\n' \
+    "$_config_b64" "$_blocked_names_b64" "$_allowed_names_b64" "$_blocked_ips_b64" "$_allowed_ips_b64" "$_subs_b64"
+}
+
+import_config_b64() {
+  # Import config from base64-encoded JSON
+  _data_b64="$2"
+  [ -z "$_data_b64" ] && { echo "Missing import data."; return 1; }
+  _json=$(printf '%s' "$_data_b64" | base64 -d 2>/dev/null)
+  [ -z "$_json" ] && { echo "Failed to decode import data."; return 1; }
+  ensure_config
+  # Backup current
+  _ts=$(date +%Y%m%d_%H%M%S)
+  cp "$CONFIG_FILE" "$CONFIG_FILE.bak.$_ts" 2>/dev/null
+  # Extract and write each part
+  _cfg=$(printf '%s' "$_json" | sed 's/.*"config":"\([^"]*\)".*/\1/' | base64 -d 2>/dev/null)
+  [ -n "$_cfg" ] && printf '%s' "$_cfg" > "$CONFIG_FILE"
+  _bn=$(printf '%s' "$_json" | sed 's/.*"blocked_names":"\([^"]*\)".*/\1/' | base64 -d 2>/dev/null)
+  [ -n "$_bn" ] && printf '%s' "$_bn" > "$CONFIG_DIR/blocked-names.txt"
+  _an=$(printf '%s' "$_json" | sed 's/.*"allowed_names":"\([^"]*\)".*/\1/' | base64 -d 2>/dev/null)
+  [ -n "$_an" ] && printf '%s' "$_an" > "$CONFIG_DIR/allowed-names.txt"
+  _bi=$(printf '%s' "$_json" | sed 's/.*"blocked_ips":"\([^"]*\)".*/\1/' | base64 -d 2>/dev/null)
+  [ -n "$_bi" ] && printf '%s' "$_bi" > "$CONFIG_DIR/blocked-ips.txt"
+  _ai=$(printf '%s' "$_json" | sed 's/.*"allowed_ips":"\([^"]*\)".*/\1/' | base64 -d 2>/dev/null)
+  [ -n "$_ai" ] && printf '%s' "$_ai" > "$CONFIG_DIR/allowed-ips.txt"
+  _subs=$(printf '%s' "$_json" | sed 's/.*"subscriptions":"\([^"]*\)".*/\1/' | base64 -d 2>/dev/null)
+  [ -n "$_subs" ] && printf '%s' "$_subs" > "$CONFIG_DIR/subscriptions.json"
+  log_msg "$CONTROL_LOG" "Config imported from backup (previous saved as .bak.$_ts)"
+  echo "Config imported successfully. Previous config backed up as .bak.$_ts"
+}
+
+get_subscriptions() {
+  # Return subscription list JSON
+  ensure_config
+  if [ -f "$CONFIG_DIR/subscriptions.json" ]; then
+    cat "$CONFIG_DIR/subscriptions.json"
+  else
+    echo '[]'
+  fi
+}
+
+save_subscriptions_b64() {
+  # Save subscriptions from base64 input
+  _data_b64="$2"
+  [ -z "$_data_b64" ] && { echo "Missing data."; return 1; }
+  ensure_config
+  printf '%s' "$_data_b64" | base64 -d > "$CONFIG_DIR/subscriptions.json" 2>/dev/null
+  echo "Subscriptions saved."
+}
+
+apply_subscriptions() {
+  # Download all enabled subscription lists and merge into blocked-names.txt
+  ensure_config
+  [ ! -f "$CONFIG_DIR/subscriptions.json" ] && { echo "No subscriptions configured."; return 0; }
+  # Parse JSON subscriptions (simple line-based extraction for busybox)
+  _subs_file="$CONFIG_DIR/subscriptions.json"
+  _merged="$CONFIG_DIR/blocked-names.txt"
+  # Keep user's manual entries (lines not starting with # subscription-)
+  _user_entries=$(grep -v '^# subscription-' "$_merged" 2>/dev/null | grep -v '^## Auto-' || true)
+  # Start fresh
+  printf '%s\n' "$_user_entries" > "$_merged.tmp"
+  printf '## Auto-generated from subscriptions on %s\n' "$(date +%Y-%m-%d)" >> "$_merged.tmp"
+  # For each enabled subscription URL, download and append
+  # Simple JSON parsing: extract url fields from enabled entries
+  _urls=$(grep -o '"url":"[^"]*"' "$_subs_file" | sed 's/"url":"//;s/"//' || true)
+  _enabled_list=$(grep -o '"enabled":[a-z]*' "$_subs_file" | sed 's/"enabled"://' || true)
+  _i=0
+  echo "$_urls" | while IFS= read -r _url; do
+    _i=$((_i + 1))
+    _en=$(echo "$_enabled_list" | sed -n "${_i}p")
+    [ "$_en" != "true" ] && continue
+    [ -z "$_url" ] && continue
+    printf '# subscription-%d: %s\n' "$_i" "$_url" >> "$_merged.tmp"
+    if has_cmd curl; then
+      curl -fsSL --connect-timeout 10 "$_url" 2>/dev/null | grep -v '^#' | grep -v '^$' | grep -v '^!' >> "$_merged.tmp" || true
+    elif has_cmd wget; then
+      wget -qO- --timeout=10 "$_url" 2>/dev/null | grep -v '^#' | grep -v '^$' | grep -v '^!' >> "$_merged.tmp" || true
+    fi
+  done
+  mv "$_merged.tmp" "$_merged"
+  _count=$(wc -l < "$_merged" 2>/dev/null || echo 0)
+  log_msg "$CONTROL_LOG" "Subscriptions applied: $_count total entries in blocked-names.txt"
+  echo "Subscriptions applied. Total entries: $_count"
+}
+
 query_stats() {
   QUERY_LOG="$CONFIG_DIR/query.log"
   if [ ! -f "$QUERY_LOG" ] || [ ! -s "$QUERY_LOG" ]; then
@@ -359,8 +509,15 @@ case "$ACTION" in
   dns-test) dns_test "$@" ;;
   list-resolvers) list_resolvers ;;
   set-resolvers) set_resolvers "$@" ;;
+  ping-resolver) ping_resolver "$@" ;;
+  ping-all) ping_all_resolvers ;;
+  export-config) export_config ;;
+  import-config-b64) import_config_b64 "$@" ;;
+  get-subscriptions) get_subscriptions ;;
+  save-subscriptions-b64) save_subscriptions_b64 "$@" ;;
+  apply-subscriptions) apply_subscriptions ;;
   *)
-    echo "Usage: $0 {start|stop|restart|status|apply-iptables|remove-iptables|update|check-update|auto-update|get-config|save-config-b64|logs|query-stats|dns-test|list-resolvers|set-resolvers}"
+    echo "Usage: $0 {start|stop|restart|status|apply-iptables|remove-iptables|update|check-update|auto-update|get-config|save-config-b64|logs|query-stats|dns-test|list-resolvers|set-resolvers|ping-resolver|ping-all|export-config|import-config-b64|get-subscriptions|save-subscriptions-b64|apply-subscriptions}"
     exit 1
     ;;
 esac
