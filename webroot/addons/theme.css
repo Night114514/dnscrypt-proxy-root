@@ -1,0 +1,71 @@
+/*
+ * Light theme overrides. The app's bundled :root defines an AMOLED-dark palette
+ * with CSS custom properties (oklch). We only redefine those variables under
+ * [data-theme="light"], so switching is a single attribute flip on <html>.
+ */
+[data-theme="light"] {
+  --background: oklch(98% .005 260);
+  --foreground: oklch(22% .02 260);
+  --card: oklch(100% 0 0);
+  --card-foreground: oklch(22% .02 260);
+  --popover: oklch(100% 0 0);
+  --popover-foreground: oklch(22% .02 260);
+  --primary: oklch(52% .17 230);
+  --primary-foreground: oklch(99% 0 0);
+  --secondary: oklch(95% .008 260);
+  --secondary-foreground: oklch(28% .02 260);
+  --muted: oklch(95% .006 260);
+  --muted-foreground: oklch(46% .02 260);
+  --accent: oklch(92% .012 260);
+  --accent-foreground: oklch(28% .02 260);
+  --destructive: oklch(55% .22 25);
+  --destructive-foreground: oklch(99% 0 0);
+  --border: oklch(88% .008 260);
+  --input: oklch(90% .008 260);
+  --ring: oklch(52% .17 230);
+  --sidebar: oklch(96% .005 260);
+  --sidebar-foreground: oklch(28% .02 260);
+  --sidebar-primary: oklch(52% .17 230);
+  --sidebar-primary-foreground: oklch(99% 0 0);
+  --sidebar-accent: oklch(92% .012 260);
+  --sidebar-accent-foreground: oklch(28% .02 260);
+  --sidebar-border: oklch(88% .008 260);
+  --sidebar-ring: oklch(52% .17 230);
+  --status-running: oklch(58% .17 160);
+  --status-stopped: oklch(60% .01 260);
+  --status-error: oklch(55% .22 25);
+  --status-updating: oklch(62% .16 70);
+}
+
+.dnscrypt-theme-toggle {
+  position: fixed;
+  top: 0.75rem;
+  right: 0.75rem;
+  z-index: 2147483000;
+  width: 2.25rem;
+  height: 2.25rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  border: 1px solid var(--border, #444);
+  background: var(--card, #1a1a1a);
+  color: var(--foreground, #eee);
+  cursor: pointer;
+  padding: 0;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+
+.dnscrypt-theme-toggle:hover {
+  background: var(--accent, #333);
+}
+
+.dnscrypt-theme-toggle:active {
+  transform: scale(0.94);
+}
+
+.dnscrypt-theme-toggle svg {
+  width: 1.15rem;
+  height: 1.15rem;
+}

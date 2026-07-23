@@ -20,6 +20,7 @@ DNSCRYPT_BIN="$BIN_DIR/dnscrypt-proxy"
 CONFIG_FILE="$CONFIG_DIR/dnscrypt-proxy.toml"
 PID_FILE="$RUN_DIR/dnscrypt-proxy.pid"
 INSTALLED_VERSION_FILE="$RUN_DIR/installed-version"
+USER_STOPPED_FILE="$RUN_DIR/user_stopped"
 UPDATE_STATUS_FILE="$RUN_DIR/update-status.env"
 UPDATE_LOG="$LOG_DIR/update.log"
 SERVICE_LOG="$LOG_DIR/service.log"
@@ -43,6 +44,16 @@ json_escape_line() {
 
 has_cmd() {
   command -v "$1" >/dev/null 2>&1
+}
+
+# Post an Android status-bar notification. title/message are fixed strings we
+# control, so single-quoting them in the su fallback is safe from injection.
+notify_user() {
+  _title="$1"
+  _message="$2"
+  cmd notification post -S bigtext -t "$_title" "dnscrypt_proxy" "$_message" >/dev/null 2>&1 || \
+  su 2000 -c "cmd notification post -S bigtext -t '$_title' 'dnscrypt_proxy' '$_message'" >/dev/null 2>&1 || \
+  true
 }
 
 busybox_cmd() {
