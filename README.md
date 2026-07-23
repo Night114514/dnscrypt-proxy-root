@@ -1,5 +1,7 @@
 # DNSCrypt Proxy Root WebUI Module
 
+[English](README.md) | [繁體中文](README.zh-TW.md) | [简体中文](README.zh-CN.md)
+
 A systemless Magisk/KernelSU/APatch module that runs **dnscrypt-proxy** on rooted Android devices with:
 
 - **Systemless encrypted DNS** via dnscrypt-proxy (DNSCrypt / DoH)
@@ -13,6 +15,9 @@ A systemless Magisk/KernelSU/APatch module that runs **dnscrypt-proxy** on roote
 - **Multi-language support** (English, 繁體中文, 简体中文)
 - **DNS query statistics** dashboard
 - **Blocklist/Allowlist** graphical management
+- **DNS Leak Test** — verify your DNS traffic actually passes through dnscrypt-proxy *(v0.7.0)*
+- **Service watchdog with Android notifications** — auto-restart and notify if the service stops unexpectedly *(v0.7.0)*
+- **Light/Dark theme toggle** in the WebUI *(v0.7.0)*
 - **GitHub Actions CI/CD** for automatic module releases
 
 ---
@@ -48,12 +53,15 @@ In **KernelSU** or **APatch** managers, tap the module's WebUI icon to access th
 | **Config** | Edit `dnscrypt-proxy.toml` with syntax highlighting |
 | **Blocklist** | Graphical domain blocklist/allowlist editor |
 | **Stats** | DNS query statistics (total queries, block rate, top domains, hourly timeline) |
-| **DNS Test** | Test domain resolution through dnscrypt-proxy vs direct DNS, compare latency |
+| **DNS Test** | Test domain resolution through dnscrypt-proxy vs direct DNS, compare latency, and run a **DNS Leak Test** *(v0.7.0)* |
 | **Resolvers** | Graphical DNS server selector with protocol/feature badges |
 | **Logs** | Real-time service and query logs |
 | **Update** | Check and install upstream binary updates |
 
 The WebUI supports **English**, **繁體中文**, and **简体中文** with automatic detection based on system language.
+
+A **Light/Dark theme toggle** (sun/moon button) sits in the top-right corner *(v0.7.0)*. The choice is
+saved in the browser's `localStorage`; the default is dark (AMOLED-friendly).
 
 ---
 
@@ -103,6 +111,43 @@ A scheduled workflow runs monthly (on the 1st of each month, and on demand via `
 
 This enables Magisk's built-in module updater to notify users of new module versions.
 
+### DNS Leak Test *(v0.7.0)*
+
+The DNS Test page includes a **Leak Test** button. When pressed, the backend
+(`dnscrypt-control.sh leak-test`):
+
+1. Generates 4 random `[a-z0-9-]` subdomains.
+2. Resolves each one **through the system DNS path** (not directly to dnscrypt-proxy), mimicking
+   an ordinary app query subject to the iptables redirection.
+3. After a short delay, greps the dnscrypt-proxy query log (and `nx.log`) for each subdomain.
+4. Reports a verdict as single-line JSON:
+   - `protected` — all 4 appeared in the log; DNS traffic is going through dnscrypt-proxy.
+   - `partial` — some appeared; possible partial leak.
+   - `leaking` — none appeared; DNS traffic is bypassing dnscrypt-proxy.
+
+If the query log is disabled it returns `{"status":"error","reason":"query_log_disabled"}` and the
+WebUI prompts you to enable it. No remote services are contacted — the test is fully local.
+
+### Service Watchdog & Notifications *(v0.7.0)*
+
+`service.sh` starts a background watchdog that checks the service every 60 seconds:
+
+- If dnscrypt-proxy stops **unexpectedly** (i.e. not via a user-initiated stop — tracked with a
+  `run/user_stopped` marker file), it posts an Android notification and **auto-restarts the service
+  once**. On successful recovery it posts a "service recovered" notification.
+- Notifications are capped at **3 per boot** so a crash loop cannot spam the status bar.
+- A successful upstream binary update also posts a notification. Failed updates stay silent (logged
+  only) to avoid noise.
+
+Notifications use `cmd notification post` (falling back to `su 2000 -c ...`).
+
+### Light/Dark Theme *(v0.7.0)*
+
+The WebUI ships an AMOLED-dark palette by default. A toggle button flips
+`document.documentElement.dataset.theme` to `light`, activating a light palette defined via CSS
+custom properties. The preference persists in `localStorage`. This is implemented as an offline
+addon injected via `webroot/index.html` without modifying the bundled JS/CSS.
+
 ---
 
 ## File Layout
@@ -122,6 +167,7 @@ dnscrypt-proxy-root/
 ├── webroot/                     # WebUI static files
 │   ├── index.html
 │   ├── icon.svg
+│   ├── addons/                  # Offline addons: leak test + theme toggle (v0.7.0)
 │   └── assets/                  # JS/CSS bundles
 ├── module.prop                  # Module metadata
 ├── customize.sh                 # Installation script
@@ -183,6 +229,26 @@ Edit via the WebUI Config tab or manually with a text editor.
 ---
 
 ## Changelog
+
+### v0.7.0 (2026-07-23)
+
+**New features**
+- **DNS Leak Test**: new `leak-test` command and a WebUI button that resolves random subdomains
+  through the system DNS path and checks the query log to confirm traffic is encrypted
+  (protected / partial / leaking verdict).
+- **Service watchdog + Android notifications**: `service.sh` monitors the daemon every 60s,
+  auto-restarts it once on an unexpected stop, and notifies via `cmd notification post`
+  (capped at 3 notifications per boot, with a user-stop marker to avoid false alarms). Successful
+  binary updates now also notify.
+- **Light/Dark theme toggle**: a WebUI toggle button with `localStorage` persistence, defaulting to
+  the AMOLED-dark palette.
+
+**Implementation notes**
+- WebUI additions are injected as offline addons under `webroot/addons/` without touching the
+  minified bundle, and are compatible with both KernelSU and APatch WebUI `ksu.exec` conventions.
+- All shell additions preserve `set -u` / busybox / toybox compatibility (no bash-only syntax,
+  no `bc`).
+- Added `README.zh-TW.md` and `README.zh-CN.md` with a language switcher across all three READMEs.
 
 ### v0.6.0 (2026-06-26)
 

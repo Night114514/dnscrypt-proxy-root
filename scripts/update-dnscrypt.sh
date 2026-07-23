@@ -113,6 +113,7 @@ fi
 # Verify the downloaded archive against the upstream minisign-signed SHA256 list to
 # guard against supply-chain tampering. dnscrypt-proxy publishes a "minisign.txt"
 # alongside each release that lists "<sha256>  <filename>" entries.
+SHA_VERIFIED=0
 SHA_FILE="$WORK/minisign.txt"
 SHA_URL="$UPSTREAM_RELEASE_BASE/$LATEST_VERSION/minisign.txt"
 if download_file "$SHA_URL" "$SHA_FILE" && [ -s "$SHA_FILE" ]; then
@@ -128,6 +129,7 @@ if download_file "$SHA_URL" "$SHA_FILE" && [ -s "$SHA_FILE" ]; then
       echo "$msg"
       exit 1
     fi
+    SHA_VERIFIED=1
     log_msg "$UPDATE_LOG" "SHA256 verified for $ASSET_NAME."
   else
     log_msg "$UPDATE_LOG" "SHA256 entry unavailable for $ASSET_NAME; skipping hash check."
@@ -192,6 +194,12 @@ update_module_description "$LATEST_VERSION"
 msg="Installed dnscrypt-proxy $LATEST_VERSION for $ARCH_ASSET."
 write_update_status "updated" "$LATEST_VERSION" "$msg"
 log_msg "$UPDATE_LOG" "$msg"
+# Notify only on a successful update; failures stay silent (log only) to avoid noise.
+if [ "$SHA_VERIFIED" -eq 1 ]; then
+  notify_user "dnscrypt-proxy 已更新" "已更新至 $LATEST_VERSION，SHA256 驗證通過"
+else
+  notify_user "dnscrypt-proxy 已更新" "已更新至 $LATEST_VERSION"
+fi
 rm -rf "$WORK"
 echo "$msg"
 exit 0

@@ -184,6 +184,8 @@ start_service() {
     echo "dnscrypt-proxy is already running."
     return 0
   fi
+  # Clear the intentional-stop marker so the watchdog treats future outages as faults.
+  rm -f "$USER_STOPPED_FILE"
   cd "$CONFIG_DIR" || return 1
   "$DNSCRYPT_BIN" -config "$CONFIG_FILE" >> "$SERVICE_LOG" 2>&1 &
   echo $! > "$PID_FILE"
@@ -199,6 +201,9 @@ start_service() {
 }
 
 stop_service() {
+  # Mark this as an intentional stop so the service watchdog does not treat it as a
+  # crash. start_service removes the marker again.
+  : > "$USER_STOPPED_FILE"
   pid=$(dnscrypt_pid 2>/dev/null || true)
   if [ -n "$pid" ]; then
     kill "$pid" >/dev/null 2>&1 || true
@@ -681,6 +686,99 @@ query_stats() {
     "$total" "$blocked" "$rate" "$unique" "$top_domains" "$top_blocked" "$timeline"
 }
 
+# Resolve the query log path from the TOML config. dnscrypt-proxy runs with its
+# working directory set to CONFIG_DIR, so a relative file is stored there.
+query_log_path() {
+  _f=$(sed -n '/^[[:space:]]*\[query_log\]/,/^[[:space:]]*\[/p' "$CONFIG_FILE" 2>/dev/null \
+    | sed -n "s/^[[:space:]]*file[[:space:]]*=[[:space:]]*['\"]\\([^'\"]*\\)['\"].*/\\1/p" \
+    | head -n 1)
+  [ -z "$_f" ] && _f="query.log"
+  case "$_f" in
+    /*) printf '%s' "$_f" ;;
+    *) printf '%s/%s' "$CONFIG_DIR" "$_f" ;;
+  esac
+}
+
+# Generate a random DNS label made only of [a-z0-9-] characters.
+random_label() {
+  _r=""
+  if [ -r /dev/urandom ]; then
+    _r=$(LC_ALL=C tr -dc 'a-z0-9' < /dev/urandom 2>/dev/null | dd bs=1 count=12 2>/dev/null)
+  fi
+  if [ -z "$_r" ]; then
+    _r=$(printf '%s%s' "$$" "$(date +%s 2>/dev/null || echo 0)" | tr -dc 'a-z0-9')
+  fi
+  printf 'leaktest-%s' "$_r"
+}
+
+# Trigger a resolution over the system DNS path (subject to iptables redirection)
+# so it mimics an ordinary app query rather than talking to dnscrypt directly.
+resolve_via_system() {
+  if has_cmd nslookup; then
+    nslookup "$1" >/dev/null 2>&1 || true
+  elif has_cmd ping; then
+    ping -c 1 -W 2 "$1" >/dev/null 2>&1 || true
+  elif has_cmd getent; then
+    getent hosts "$1" >/dev/null 2>&1 || true
+  fi
+  return 0
+}
+
+leak_test() {
+  ensure_config
+  # Query log must be enabled for the comparison to work.
+  if ! grep -q '^[[:space:]]*\[query_log\]' "$CONFIG_FILE" 2>/dev/null; then
+    echo '{"status":"error","reason":"query_log_disabled"}'
+    return 0
+  fi
+  _qlog=$(query_log_path)
+  # nx.log captures NXDOMAIN responses; random subdomains resolve to NXDOMAIN, so
+  # searching both logs avoids a false "leaking" verdict.
+  _nxlog="$CONFIG_DIR/nx.log"
+
+  _domains=""
+  _i=0
+  while [ "$_i" -lt 4 ]; do
+    _label=$(random_label)
+    case "$_label" in
+      *[!a-z0-9-]*) continue ;;
+    esac
+    _domain="${_label}.example.com"
+    _domains="$_domains $_domain"
+    resolve_via_system "$_domain"
+    _i=$((_i + 1))
+  done
+
+  # Give dnscrypt-proxy a moment to flush the query log.
+  sleep 2
+
+  _matched=0
+  _json_domains=""
+  _first=1
+  for _d in $_domains; do
+    _hit=0
+    if [ -f "$_qlog" ] && grep -qF "$_d" "$_qlog" 2>/dev/null; then
+      _hit=1
+    elif [ -f "$_nxlog" ] && grep -qF "$_d" "$_nxlog" 2>/dev/null; then
+      _hit=1
+    fi
+    [ "$_hit" -eq 1 ] && _matched=$((_matched + 1))
+    [ $_first -eq 0 ] && _json_domains="$_json_domains,"
+    _json_domains="$_json_domains\"$_d\""
+    _first=0
+  done
+
+  if [ "$_matched" -eq 4 ]; then
+    _status="protected"
+  elif [ "$_matched" -eq 0 ]; then
+    _status="leaking"
+  else
+    _status="partial"
+  fi
+  printf '{"status":"%s","tested":4,"matched":%d,"domains":[%s]}\n' \
+    "$_status" "$_matched" "$_json_domains"
+}
+
 case "$ACTION" in
   start) start_service ;;
   stop) stop_service ;;
@@ -696,6 +794,7 @@ case "$ACTION" in
   logs) show_logs "$@" ;;
   query-stats) query_stats ;;
   dns-test) dns_test "$@" ;;
+  leak-test) leak_test ;;
   list-resolvers) list_resolvers ;;
   set-resolvers) set_resolvers "$@" ;;
   ping-resolver) ping_resolver "$@" ;;
@@ -709,7 +808,7 @@ case "$ACTION" in
   save-subscriptions-b64) save_subscriptions_b64 "$@" ;;
   apply-subscriptions) apply_subscriptions ;;
   *)
-    echo "Usage: $0 {start|stop|restart|status|apply-iptables|remove-iptables|update|check-update|auto-update|get-config|save-config-b64|logs|query-stats|dns-test|list-resolvers|set-resolvers|ping-resolver|ping-all|protocol-status|quick-mode|get-mode|export-config|import-config-b64|get-subscriptions|save-subscriptions-b64|apply-subscriptions}"
+    echo "Usage: $0 {start|stop|restart|status|apply-iptables|remove-iptables|update|check-update|auto-update|get-config|save-config-b64|logs|query-stats|dns-test|leak-test|list-resolvers|set-resolvers|ping-resolver|ping-all|protocol-status|quick-mode|get-mode|export-config|import-config-b64|get-subscriptions|save-subscriptions-b64|apply-subscriptions}"
     exit 1
     ;;
 esac

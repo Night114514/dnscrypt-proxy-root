@@ -1,0 +1,36 @@
+.dnscrypt-leaktest {
+  margin-top: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.dnscrypt-leaktest-btn {
+  align-self: flex-start;
+  padding: 0.5rem 1rem;
+  border-radius: var(--radius, 0.5rem);
+  border: 1px solid var(--border, #444);
+  background: var(--secondary, #222);
+  color: var(--secondary-foreground, #eee);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+
+.dnscrypt-leaktest-btn:hover:not(:disabled) {
+  background: var(--accent, #333);
+}
+
+.dnscrypt-leaktest-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.dnscrypt-leaktest-result {
+  font-size: 0.875rem;
+  line-height: 1.4;
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--radius, 0.5rem);
+  background: var(--muted, rgba(127, 127, 127, 0.12));
+}
