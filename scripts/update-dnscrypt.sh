@@ -20,6 +20,8 @@ mkdir -p "$RUN_DIR" "$LOG_DIR" "$TMP_BASE"
 LOCK_OWNED=0
 LOCK_FD_OPEN=0
 
+# Called indirectly by the signal and exit traps below.
+# shellcheck disable=SC2317
 finish() {
   if [ "$LOCK_OWNED" -eq 1 ]; then
     lock_owner=$(cat "$LOCK_FILE" 2>/dev/null || true)
