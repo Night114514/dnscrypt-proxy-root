@@ -2,147 +2,289 @@ name: Auto Update dnscrypt-proxy
 
 on:
   schedule:
-    # Check for upstream updates every 1 month
+    # Check for upstream updates every month.
     - cron: '0 0 1 * *'
   workflow_dispatch:
     inputs:
-      force_release:
-        description: 'Force a new release even if versions match'
+      module_version:
+        description: 'Optional module version (vX.Y.Z or X.Y.Z); otherwise bump patch'
         required: false
-        default: 'false'
+        type: string
+      force_release:
+        description: 'Release even if the upstream version is unchanged'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: dnscrypt-proxy-root-release
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
 jobs:
   check-and-release:
+    # A dispatch from a feature branch must never advance master or publish it.
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Check out master
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: master
 
-      - name: Get upstream latest version
+      - name: Read and validate upstream version
         id: upstream
         run: |
-          LATEST=$(curl -fsSL https://api.github.com/repos/dnscrypt/dnscrypt-proxy/releases/latest | jq -r '.tag_name' )
-          echo "version=${LATEST}" >> $GITHUB_OUTPUT
-          echo "Upstream latest: ${LATEST}"
-
-      - name: Get current module version
-        id: current
-        run: |
-          CURRENT=$(grep '^version=' module.prop | cut -d= -f2)
-          echo "version=${CURRENT}" >> $GITHUB_OUTPUT
-          echo "Current module version: ${CURRENT}"
-
-      - name: Compare versions
-        id: compare
-        run: |
-          UPSTREAM="${{ steps.upstream.outputs.version }}"
-          CURRENT="${{ steps.current.outputs.version }}"
-          FORCE="${{ github.event.inputs.force_release }}"
-          
-          # Strip leading 'v' for comparison
-          UPSTREAM_CLEAN="${UPSTREAM#v}"
-          CURRENT_CLEAN="${CURRENT#v}"
-          
-          if [ "$FORCE" = "true" ] || [ "$UPSTREAM_CLEAN" != "$CURRENT_CLEAN" ]; then
-            echo "needs_update=true" >> $GITHUB_OUTPUT
-            echo "Update needed: ${CURRENT} -> ${UPSTREAM}"
-          else
-            echo "needs_update=false" >> $GITHUB_OUTPUT
-            echo "Already up to date: ${CURRENT}"
+          RAW_VERSION=$(curl -fsSL https://api.github.com/repos/dnscrypt/dnscrypt-proxy/releases/latest \
+            | jq -er '.tag_name | select(type == "string" and length > 0)')
+          UPSTREAM_VERSION="${RAW_VERSION#v}"
+          if ! printf '%s\n' "$UPSTREAM_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Invalid upstream release tag: $RAW_VERSION" >&2
+            exit 1
           fi
 
-      - name: Update module.prop
-        if: steps.compare.outputs.needs_update == 'true'
-        run: |
-          RAW_VERSION="${{ steps.upstream.outputs.version }}"
-          NEW_VERSION="${RAW_VERSION#v}"
-          # Calculate new versionCode (YYYYMMDDNN format)
-          NEW_CODE=$(date +%Y%m%d01)
-          
-          sed -i "s/^version=.*/version=${NEW_VERSION}/" module.prop
-          sed -i "s/^versionCode=.*/versionCode=${NEW_CODE}/" module.prop
-          
-          echo "Updated module.prop:"
-          cat module.prop
+          echo "version=$UPSTREAM_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Upstream latest: $UPSTREAM_VERSION"
 
-      - name: Update update.json
-        if: steps.compare.outputs.needs_update == 'true'
+      - name: Decide whether a release is needed
+        id: compare
+        env:
+          FORCE_RELEASE: ${{ github.event.inputs.force_release }}
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_VERSION: ${{ github.event.inputs.module_version }}
+          UPSTREAM_VERSION: ${{ steps.upstream.outputs.version }}
         run: |
-          RAW_VERSION="${{ steps.upstream.outputs.version }}"
-          NEW_VERSION="${RAW_VERSION#v}"
-          NEW_CODE=$(date +%Y%m%d01)
-          REPO="${{ github.repository }}"
-          
-          cat > update.json << EOF
-          {
-            "version": "${NEW_VERSION}",
-            "versionCode": ${NEW_CODE},
-            "zipUrl": "https://github.com/${REPO}/releases/download/v${NEW_VERSION}/dnscrypt-proxy-root-v${NEW_VERSION}.zip",
-            "changelog": "https://github.com/${REPO}/releases/tag/v${NEW_VERSION}"
-          }
-          EOF
-          
-          echo "Updated update.json:"
+          TRACKED_VERSION=$(tr -d '[:space:]' < .github/upstream-version)
+          if ! printf '%s\n' "$TRACKED_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Invalid tracked upstream version: $TRACKED_VERSION" >&2
+            exit 1
+          fi
+
+          echo "recovery=false" >> "$GITHUB_OUTPUT"
+          if [ "$FORCE_RELEASE" = "true" ] || [ -n "$REQUESTED_VERSION" ] || [ "$UPSTREAM_VERSION" != "$TRACKED_VERSION" ]; then
+            echo "needs_update=true" >> "$GITHUB_OUTPUT"
+            echo "Release requested (tracked upstream: $TRACKED_VERSION; latest: $UPSTREAM_VERSION)."
+            exit 0
+          fi
+
+          CURRENT_TAG=$(sed -n 's/^version=//p' module.prop)
+          if ! printf '%s\n' "$CURRENT_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Invalid current module version: $CURRENT_TAG" >&2
+            exit 1
+          fi
+          EXPECTED_ZIP="dnscrypt-proxy-root-$CURRENT_TAG.zip"
+          RESPONSE=$(curl -sS \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -w '\n%{http_code}' \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/$CURRENT_TAG")
+          HTTP_CODE=$(printf '%s\n' "$RESPONSE" | tail -n 1)
+          RELEASE_JSON=$(printf '%s\n' "$RESPONSE" | sed '$d')
+
+          if [ "$HTTP_CODE" = "200" ] && printf '%s\n' "$RELEASE_JSON" | jq -e \
+            --arg tag "$CURRENT_TAG" \
+            --arg zip "$EXPECTED_ZIP" \
+            '(.tag_name == $tag) and (.draft == false) and (.prerelease == false) and
+             any(.assets[]?; .name == $zip and .state == "uploaded" and .size > 0) and
+             any(.assets[]?; .name == "update.json" and .state == "uploaded" and .size > 0)' >/dev/null; then
+            echo "needs_update=false" >> "$GITHUB_OUTPUT"
+            echo "Already tracking upstream $UPSTREAM_VERSION with a complete $CURRENT_TAG Release."
+          elif [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "404" ]; then
+            echo "needs_update=true" >> "$GITHUB_OUTPUT"
+            echo "recovery=true" >> "$GITHUB_OUTPUT"
+            echo "The $CURRENT_TAG Release is missing or incomplete; entering recovery mode."
+          else
+            echo "Unable to inspect $CURRENT_TAG Release (HTTP $HTTP_CODE)." >&2
+            exit 1
+          fi
+
+      - name: Resolve module release version
+        if: steps.compare.outputs.needs_update == 'true'
+        id: module
+        env:
+          RECOVERY_REQUESTED: ${{ steps.compare.outputs.recovery }}
+          REQUESTED_VERSION: ${{ github.event.inputs.module_version }}
+          UPSTREAM_VERSION: ${{ steps.upstream.outputs.version }}
+        run: |
+          CURRENT_TAG=$(sed -n 's/^version=//p' module.prop)
+          if ! printf '%s\n' "$CURRENT_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Invalid current module version: $CURRENT_TAG" >&2
+            exit 1
+          fi
+          CURRENT_VERSION="${CURRENT_TAG#v}"
+
+          CURRENT_CODE=$(sed -n 's/^versionCode=//p' module.prop)
+          if ! printf '%s\n' "$CURRENT_CODE" | grep -Eq '^[0-9]+$'; then
+            echo "Invalid current versionCode: $CURRENT_CODE" >&2
+            exit 1
+          fi
+
+          TRACKED_VERSION=$(tr -d '[:space:]' < .github/upstream-version)
+          RECOVERY=false
+          if [ "$RECOVERY_REQUESTED" = "true" ]; then
+            MODULE_TAG="$CURRENT_TAG"
+            RECOVERY=true
+          elif [ -n "$REQUESTED_VERSION" ]; then
+            MODULE_VERSION="${REQUESTED_VERSION#v}"
+            if ! printf '%s\n' "$MODULE_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "Invalid requested module version: $REQUESTED_VERSION" >&2
+              exit 1
+            fi
+            MODULE_TAG="v$MODULE_VERSION"
+            if [ "$MODULE_TAG" = "$CURRENT_TAG" ]; then
+              if [ "$UPSTREAM_VERSION" != "$TRACKED_VERSION" ]; then
+                echo 'A new upstream version requires a new module version.' >&2
+                exit 1
+              fi
+              RECOVERY=true
+            fi
+          else
+            IFS=. read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
+            MODULE_TAG="v$MAJOR.$MINOR.$((PATCH + 1))"
+          fi
+
+          if [ "$RECOVERY" = "true" ]; then
+            NEXT_CODE=$CURRENT_CODE
+            if git rev-parse --verify --quiet "refs/tags/$MODULE_TAG" >/dev/null; then
+              TAG_SHA=$(git rev-parse "$MODULE_TAG^{commit}")
+              HEAD_SHA=$(git rev-parse HEAD)
+              if [ "$TAG_SHA" != "$HEAD_SHA" ]; then
+                echo "Recovery tag $MODULE_TAG points to $TAG_SHA, not $HEAD_SHA." >&2
+                exit 1
+              fi
+            fi
+          else
+            if git rev-parse --verify --quiet "refs/tags/$MODULE_TAG" >/dev/null; then
+              echo "Release tag already exists: $MODULE_TAG" >&2
+              exit 1
+            fi
+            NEXT_CODE=$((CURRENT_CODE + 1))
+            DATE_CODE=$(date -u +%Y%m%d01)
+            if [ "$DATE_CODE" -gt "$NEXT_CODE" ]; then
+              NEXT_CODE=$DATE_CODE
+            fi
+          fi
+
+          echo "recovery=$RECOVERY" >> "$GITHUB_OUTPUT"
+          echo "version=$MODULE_TAG" >> "$GITHUB_OUTPUT"
+          echo "version_code=$NEXT_CODE" >> "$GITHUB_OUTPUT"
+          echo "zip_name=dnscrypt-proxy-root-$MODULE_TAG.zip" >> "$GITHUB_OUTPUT"
+          echo "Module release: $MODULE_TAG ($NEXT_CODE; recovery=$RECOVERY)"
+
+      - name: Update release metadata
+        if: steps.compare.outputs.needs_update == 'true' && steps.module.outputs.recovery != 'true'
+        env:
+          MODULE_VERSION: ${{ steps.module.outputs.version }}
+          VERSION_CODE: ${{ steps.module.outputs.version_code }}
+          UPSTREAM_VERSION: ${{ steps.upstream.outputs.version }}
+        run: |
+          sed -i "s/^version=.*/version=$MODULE_VERSION/" module.prop
+          sed -i "s/^versionCode=.*/versionCode=$VERSION_CODE/" module.prop
+          sed -i "s#^description=.*#description=Systemless dnscrypt-proxy for Magisk/KernelSU/APatch with automatic upstream binary updates and KernelSU/APatch WebUI. Installed dnscrypt-proxy: $UPSTREAM_VERSION.#" module.prop
+          printf '%s\n' "$UPSTREAM_VERSION" > .github/upstream-version
+
+          jq -n \
+            --arg version "$MODULE_VERSION" \
+            --argjson versionCode "$VERSION_CODE" \
+            --arg zipUrl "https://github.com/${{ github.repository }}/releases/download/$MODULE_VERSION/dnscrypt-proxy-root-$MODULE_VERSION.zip" \
+            --arg changelog "https://github.com/${{ github.repository }}/releases/tag/$MODULE_VERSION" \
+            '{version: $version, versionCode: $versionCode, zipUrl: $zipUrl, changelog: $changelog}' \
+            > update.json
+
+          cat module.prop
           cat update.json
 
-      - name: Build module ZIP
+      - name: Build and inspect module ZIP
         if: steps.compare.outputs.needs_update == 'true'
+        env:
+          ZIP_NAME: ${{ steps.module.outputs.zip_name }}
         run: |
-          RAW_VERSION="${{ steps.upstream.outputs.version }}"
-          NEW_VERSION="${RAW_VERSION#v}"
-          ZIP_NAME="dnscrypt-proxy-root-v${NEW_VERSION}.zip"
-          
-          # Create ZIP excluding dev files
-          zip -r "${ZIP_NAME}" . \
-            -x ".git/*" \
-            -x ".github/*" \
-            -x "*.md" \
-            -x "tmp/*" \
-            -x "run/*" \
-            -x "logs/*" \
-            -x "bin/*"
-          
-          echo "zip_name=${ZIP_NAME}" >> $GITHUB_ENV
-          echo "new_version=v${NEW_VERSION}" >> $GITHUB_ENV
-          
-          ls -la "${ZIP_NAME}"
+          zip -r "$ZIP_NAME" \
+            META-INF \
+            config \
+            scripts \
+            webroot \
+            action.sh \
+            customize.sh \
+            module.prop \
+            post-fs-data.sh \
+            service.sh \
+            skip_mount \
+            uninstall.sh \
+            update.json
 
-      - name: Commit version bump
+          unzip -t "$ZIP_NAME"
+          if unzip -Z1 "$ZIP_NAME" | grep -Eq '(^|/)(\.git|\.github|tests|bin|run|logs|tmp)(/|$)|(^|/)README[^/]*$|(^|/)\.gitattributes$'; then
+            echo 'Release ZIP contains a development-only path.' >&2
+            exit 1
+          fi
+          unzip -Z1 "$ZIP_NAME"
+
+      - name: Publish module metadata and tag
         if: steps.compare.outputs.needs_update == 'true'
+        id: publish
+        env:
+          MODULE_VERSION: ${{ steps.module.outputs.version }}
+          RECOVERY: ${{ steps.module.outputs.recovery }}
+          UPSTREAM_VERSION: ${{ steps.upstream.outputs.version }}
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add module.prop update.json
-          git commit -m "chore: bump to ${{ steps.upstream.outputs.version }}"
-          git push
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Create Release
+          if [ "$RECOVERY" = "true" ]; then
+            RELEASE_SHA=$(git rev-parse HEAD)
+            if git rev-parse --verify --quiet "refs/tags/$MODULE_VERSION" >/dev/null; then
+              TAG_SHA=$(git rev-parse "$MODULE_VERSION^{commit}")
+              [ "$TAG_SHA" = "$RELEASE_SHA" ] || {
+                echo "Recovery tag $MODULE_VERSION moved to $TAG_SHA." >&2
+                exit 1
+              }
+            else
+              git tag "$MODULE_VERSION" "$RELEASE_SHA"
+              git push origin "refs/tags/$MODULE_VERSION"
+            fi
+          else
+            git add .github/upstream-version module.prop update.json
+            if git diff --cached --quiet; then
+              echo 'Release metadata did not change.' >&2
+              exit 1
+            fi
+            git commit -m "chore(release): $MODULE_VERSION (dnscrypt-proxy $UPSTREAM_VERSION)"
+            RELEASE_SHA=$(git rev-parse HEAD)
+            git tag "$MODULE_VERSION" "$RELEASE_SHA"
+            git push --atomic origin HEAD:master "refs/tags/$MODULE_VERSION"
+          fi
+
+          TAG_SHA=$(git rev-parse "$MODULE_VERSION^{commit}")
+          [ "$TAG_SHA" = "$RELEASE_SHA" ] || {
+            echo "Release tag $MODULE_VERSION does not match $RELEASE_SHA." >&2
+            exit 1
+          }
+          echo "release_sha=$RELEASE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Create module Release
         if: steps.compare.outputs.needs_update == 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          tag_name: ${{ env.new_version }}
-          name: "DNSCrypt Proxy Root ${{ env.new_version }}"
+          tag_name: ${{ steps.module.outputs.version }}
+          target_commitish: ${{ steps.publish.outputs.release_sha }}
+          name: ${{ steps.module.outputs.version }}
           body: |
-            ## Auto-update Release
-            
-            Upstream dnscrypt-proxy updated to **${{ steps.upstream.outputs.version }}**.
-            
-            ### Changes
-            - Updated dnscrypt-proxy binary version
-            - Module will auto-download the new binary on next boot
-            
-            ### Install
-            Flash `${{ env.zip_name }}` via Magisk/KernelSU/APatch manager.
-            
-            ### Upstream Changelog
-            See [dnscrypt-proxy releases](https://github.com/dnscrypt/dnscrypt-proxy/releases/tag/${{ steps.upstream.outputs.version }} )
+            ## Module release ${{ steps.module.outputs.version }}
+
+            - Module version: `${{ steps.module.outputs.version }}`
+            - Upstream dnscrypt-proxy: `${{ steps.upstream.outputs.version }}`
+
+            The module downloads the matching upstream binary during installation or on the next update check; the binary is not bundled in the ZIP.
+
+            See the [upstream changelog](https://github.com/dnscrypt/dnscrypt-proxy/releases/tag/${{ steps.upstream.outputs.version }}).
           files: |
-            ${{ env.zip_name }}
+            ${{ steps.module.outputs.zip_name }}
             update.json
+          fail_on_unmatched_files: true
+          make_latest: true
           draft: false
           prerelease: false

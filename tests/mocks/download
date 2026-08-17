@@ -1,0 +1,92 @@
+#!/bin/sh
+set -u
+
+tool_name=${MOCK_TOOL_LABEL:-${0##*/}}
+output_file=
+download_url=
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o|-O)
+      shift
+      [ "$#" -gt 0 ] || exit 64
+      output_file=$1
+      ;;
+    http://*|https://*)
+      download_url=$1
+      ;;
+  esac
+  shift
+done
+
+[ -n "$output_file" ] || exit 64
+[ -n "$download_url" ] || exit 64
+
+printf '%s %s\n' "$tool_name" "$download_url" >> "$MOCK_CALL_LOG"
+
+case "$download_url" in
+  "$MOCK_UPSTREAM_API")
+    case "$MOCK_METADATA_MODE" in
+      success)
+        printf '{"tag_name":"%s"}\n' "$MOCK_LATEST_VERSION" > "$output_file"
+        ;;
+      wait-success)
+        : > "$MOCK_WAIT_READY"
+        wait_count=0
+        while [ ! -f "$MOCK_WAIT_RELEASE" ]; do
+          wait_count=$((wait_count + 1))
+          [ "$wait_count" -le 500 ] || exit 70
+          "$MOCK_HOST_SLEEP" 0.02
+        done
+        printf '{"tag_name":"%s"}\n' "$MOCK_LATEST_VERSION" > "$output_file"
+        ;;
+      malformed)
+        printf '{"name":"missing tag"}\n' > "$output_file"
+        ;;
+      fail)
+        exit 22
+        ;;
+      *)
+        exit 64
+        ;;
+    esac
+    ;;
+  */minisign.txt)
+    case "$MOCK_CHECKSUM_MODE" in
+      match)
+        printf '%s  %s\n' "$MOCK_ACTUAL_SHA" "$MOCK_ASSET_NAME" > "$output_file"
+        ;;
+      mismatch)
+        printf '%s  %s\n' 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$MOCK_ASSET_NAME" > "$output_file"
+        ;;
+      missing-entry)
+        printf '%s  %s\n' "$MOCK_ACTUAL_SHA" 'dnscrypt-proxy-other.zip' > "$output_file"
+        ;;
+      empty)
+        : > "$output_file"
+        ;;
+      fail)
+        exit 22
+        ;;
+      *)
+        exit 64
+        ;;
+    esac
+    ;;
+  *.zip)
+    case "$MOCK_ASSET_MODE" in
+      success)
+        printf 'mock archive\n' > "$output_file"
+        ;;
+      fail)
+        exit 22
+        ;;
+      *)
+        exit 64
+        ;;
+    esac
+    ;;
+  *)
+    exit 22
+    ;;
+esac

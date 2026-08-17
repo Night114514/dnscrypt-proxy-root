@@ -1,0 +1,5 @@
+#!/bin/sh
+set -u
+
+[ "$#" -eq 1 ] || exit 64
+printf '%s  %s\n' "$MOCK_ACTUAL_SHA" "$1"

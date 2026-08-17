@@ -1,4 +1,6 @@
 #!/system/bin/sh
+# These assignments form the public state of a sourced shell library.
+# shellcheck disable=SC2034
 set -u
 
 MODID="dnscrypt-proxy-root"

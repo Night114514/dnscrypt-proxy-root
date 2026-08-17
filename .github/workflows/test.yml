@@ -1,0 +1,91 @@
+name: Shell tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  updater-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install shell test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes busybox-static shellcheck util-linux
+
+      - name: Check shell syntax
+        shell: dash -e {0}
+        run: |
+          for file in \
+            action.sh \
+            customize.sh \
+            post-fs-data.sh \
+            service.sh \
+            uninstall.sh \
+            scripts/common.sh \
+            scripts/dnscrypt-control.sh \
+            scripts/update-dnscrypt.sh \
+            tests/test-update-dnscrypt.sh \
+            tests/mocks/busybox-ash-prelude
+          do
+            dash -n "$file" || exit 1
+          done
+
+      - name: Check BusyBox ash syntax
+        run: |
+          for file in \
+            action.sh \
+            customize.sh \
+            post-fs-data.sh \
+            service.sh \
+            uninstall.sh \
+            scripts/common.sh \
+            scripts/dnscrypt-control.sh \
+            scripts/update-dnscrypt.sh \
+            tests/test-update-dnscrypt.sh \
+            tests/mocks/busybox \
+            tests/mocks/busybox-ash-prelude \
+            tests/mocks/date \
+            tests/mocks/download \
+            tests/mocks/getprop \
+            tests/mocks/mv \
+            tests/mocks/notify \
+            tests/mocks/sha256sum \
+            tests/mocks/uname \
+            tests/mocks/unzip
+          do
+            busybox ash -n "$file" || exit 1
+          done
+
+      - name: Run ShellCheck
+        run: |
+          shellcheck -s sh \
+            scripts/common.sh \
+            scripts/update-dnscrypt.sh \
+            tests/test-update-dnscrypt.sh \
+            tests/mocks/busybox \
+            tests/mocks/busybox-ash-prelude \
+            tests/mocks/date \
+            tests/mocks/download \
+            tests/mocks/getprop \
+            tests/mocks/mv \
+            tests/mocks/notify \
+            tests/mocks/sha256sum \
+            tests/mocks/uname \
+            tests/mocks/unzip
+
+      - name: Run updater tests with dash
+        run: env DNSCRYPT_UPDATE_INTERVAL_SECONDS=0 TEST_SHELL_KIND=dash dash tests/test-update-dnscrypt.sh
+
+      - name: Run updater tests with BusyBox ash
+        run: env DNSCRYPT_UPDATE_INTERVAL_SECONDS=0 TEST_SHELL_KIND=busybox-ash busybox ash tests/test-update-dnscrypt.sh

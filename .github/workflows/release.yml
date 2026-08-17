@@ -1,65 +1,151 @@
-name: Manual Release
+name: Module Release
 
 on:
   push:
-    tags:
-      - 'v*'
-
+    branches:
+      - master
+    paths:
+      - module.prop
+      - update.json
 permissions:
   contents: write
 
+concurrency:
+  group: dnscrypt-proxy-root-release
+  cancel-in-progress: false
+
 jobs:
-  release:
-    # Skip tags pushed by the auto-update workflow's bot to avoid a duplicate release
-    # (auto-update.yml already publishes the release for those tags).
+  verify:
     if: github.actor != 'github-actions[bot]'
+    uses: ./.github/workflows/test.yml
+
+  release:
+    if: needs.verify.result == 'success' && github.actor != 'github-actions[bot]'
+    needs: verify
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Extract version from tag
+      - name: Validate release metadata
         id: version
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          echo "tag=${TAG}" >> $GITHUB_OUTPUT
-          echo "Release tag: ${TAG}"
+          TAG=$(sed -n 's/^version=//p' module.prop)
 
-      - name: Build module ZIP
+          if ! printf '%s\n' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Invalid module release tag: $TAG" >&2
+            exit 1
+          fi
+
+          MODULE_VERSION=$(sed -n 's/^version=//p' module.prop)
+          MODULE_CODE=$(sed -n 's/^versionCode=//p' module.prop)
+          JSON_VERSION=$(jq -er '.version | select(type == "string")' update.json)
+          JSON_CODE=$(jq -er '.versionCode | select(type == "number")' update.json)
+          JSON_ZIP_URL=$(jq -er '.zipUrl | select(type == "string")' update.json)
+          EXPECTED_ZIP_URL="https://github.com/${{ github.repository }}/releases/download/$TAG/dnscrypt-proxy-root-$TAG.zip"
+
+          [ "$TAG" = "$MODULE_VERSION" ] || {
+            echo "Tag ($TAG) does not match module.prop ($MODULE_VERSION)." >&2
+            exit 1
+          }
+          [ "$TAG" = "$JSON_VERSION" ] || {
+            echo "Tag ($TAG) does not match update.json ($JSON_VERSION)." >&2
+            exit 1
+          }
+          [ "$MODULE_CODE" = "$JSON_CODE" ] || {
+            echo "versionCode mismatch: module.prop=$MODULE_CODE update.json=$JSON_CODE" >&2
+            exit 1
+          }
+          [ "$JSON_ZIP_URL" = "$EXPECTED_ZIP_URL" ] || {
+            echo "Unexpected update ZIP URL: $JSON_ZIP_URL" >&2
+            exit 1
+          }
+
+          UPSTREAM_VERSION=$(tr -d '[:space:]' < .github/upstream-version)
+          if ! printf '%s\n' "$UPSTREAM_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Invalid tracked upstream version: $UPSTREAM_VERSION" >&2
+            exit 1
+          fi
+
+          RELEASE_SHA=$(git rev-parse HEAD)
+          if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
+            TAG_SHA=$(git rev-parse "$TAG^{commit}")
+            [ "$TAG_SHA" = "$RELEASE_SHA" ] || {
+              echo "Release tag $TAG points to $TAG_SHA, not $RELEASE_SHA." >&2
+              exit 1
+            }
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "upstream=$UPSTREAM_VERSION" >> "$GITHUB_OUTPUT"
+          echo "zip_name=dnscrypt-proxy-root-$TAG.zip" >> "$GITHUB_OUTPUT"
+          echo "release_sha=$RELEASE_SHA" >> "$GITHUB_OUTPUT"
+          echo "Validated module release $TAG (dnscrypt-proxy $UPSTREAM_VERSION)."
+
+      - name: Build and inspect module ZIP
+        env:
+          ZIP_NAME: ${{ steps.version.outputs.zip_name }}
         run: |
-          TAG="${{ steps.version.outputs.tag }}"
-          ZIP_NAME="dnscrypt-proxy-root-${TAG}.zip"
-          
-          zip -r "${ZIP_NAME}" . \
-            -x ".git/*" \
-            -x ".github/*" \
-            -x "*.md" \
-            -x "tmp/*" \
-            -x "run/*" \
-            -x "logs/*" \
-            -x "bin/*"
-          
-          echo "zip_name=${ZIP_NAME}" >> $GITHUB_ENV
-          ls -la "${ZIP_NAME}"
+          zip -r "$ZIP_NAME" \
+            META-INF \
+            config \
+            scripts \
+            webroot \
+            action.sh \
+            customize.sh \
+            module.prop \
+            post-fs-data.sh \
+            service.sh \
+            skip_mount \
+            uninstall.sh \
+            update.json
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+          unzip -t "$ZIP_NAME"
+          if unzip -Z1 "$ZIP_NAME" | grep -Eq '(^|/)(\.git|\.github|tests|bin|run|logs|tmp)(/|$)|(^|/)README[^/]*$|(^|/)\.gitattributes$'; then
+            echo 'Release ZIP contains a development-only path.' >&2
+            exit 1
+          fi
+          unzip -Z1 "$ZIP_NAME"
+
+      - name: Publish release tag
+        id: publish
+        env:
+          RELEASE_SHA: ${{ steps.version.outputs.release_sha }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
+            TAG_SHA=$(git rev-parse "$TAG^{commit}")
+            [ "$TAG_SHA" = "$RELEASE_SHA" ] || {
+              echo "Release tag $TAG moved to $TAG_SHA." >&2
+              exit 1
+            }
+          else
+            git tag "$TAG" "$RELEASE_SHA"
+            git push origin "refs/tags/$TAG"
+          fi
+          echo "release_sha=$RELEASE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Create module Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
-          name: "DNSCrypt Proxy Root ${{ steps.version.outputs.tag }}"
+          target_commitish: ${{ steps.publish.outputs.release_sha }}
+          name: ${{ steps.version.outputs.tag }}
           body: |
-            ## Release ${{ steps.version.outputs.tag }}
-            
-            ### Install
-            Flash `${{ env.zip_name }}` via Magisk/KernelSU/APatch manager.
-            
-            ### Features
-            - DNSCrypt-proxy with automatic updates
-            - WebUI for KernelSU/APatch managers
-            - iptables-based DNS redirection
-            - Multi-architecture support (arm64/arm/x86_64/x86)
+            ## Module release ${{ steps.version.outputs.tag }}
+
+            - Module version: `${{ steps.version.outputs.tag }}`
+            - Upstream dnscrypt-proxy: `${{ steps.version.outputs.upstream }}`
+
+            The matching dnscrypt-proxy binary is downloaded during installation or on the next update check; it is not bundled in the module ZIP.
+
+            Existing installations whose update descriptor is pinned to `v0.7.0` must install `v0.8.0` manually once. Releases from `v0.8.0` onward use a stable update descriptor URL.
           files: |
-            ${{ env.zip_name }}
+            ${{ steps.version.outputs.zip_name }}
             update.json
+          fail_on_unmatched_files: true
+          make_latest: true
           draft: false
           prerelease: false

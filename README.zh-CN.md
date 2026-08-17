@@ -26,6 +26,7 @@
 
 - Android 7.0 以上（API 24+）
 - 下列其一：**Magisk 20.4+**、**KernelSU 0.7.0+** 或 **APatch 10596+**
+- 更新器需要 `flock`（Android 7+ 的 Toybox 已提供；若系统命令不可用，将改用 root 管理器的 BusyBox）
 - 内核需支持 **iptables NAT**（绝大多数设备均支持）
 - WebUI 管理界面需要 KernelSU 或 APatch（Magisk 没有 WebUI；在 Magisk 上，action 按钮改为切换服务开关）
 
@@ -87,15 +88,18 @@ WebUI 支持 **English**、**繁體中文** 与 **简体中文**，并依系统�
 5. 更新模块元数据
 
 检查频率限制为每 24 小时一次（可通过 `DNSCRYPT_UPDATE_INTERVAL_SECONDS` 配置）。
+只有成功下载 release metadata 并解析出非空 release tag 后，才会记录限流时间；网络失败或 metadata 格式错误可在下次调用时立即重试。
+
+更新器也会尝试使用同一 release 下载的 `minisign.txt` 进行 best-effort SHA256 比对。程序**不会**使用 Minisign 或固定公钥验证该校验列表。实际哈希不匹配会中止更新；但列表下载失败、找不到资源条目或无法计算哈希时，仍会继续安装。此比对只能在校验数据可用时检测意外损坏，不能验证发布者身份。
 
 ### CI/CD 自动更新（GitHub Actions）
 
 计划任务工作流每月运行一次（每月 1 号，也可通过 `workflow_dispatch` 手动触发）：
 
-1. 检查上游 dnscrypt-proxy releases
-2. 若检测到新版，更新 `module.prop` 与 `update.json`
-3. 构建新的模块 ZIP
-4. 创建含更新 asset 的 GitHub Release
+1. 将上游 dnscrypt-proxy release 与独立记录的 `.github/upstream-version` 比较
+2. 若检测到新的上游版本，递增模块本身独立的 `vX.X.X` patch 版本
+3. 更新 `module.prop`、`update.json` 与上游版本记录
+4. 构建仅含运行时文件的模块 ZIP，并以模块版本命名 GitHub Release
 
 这让 Magisk 内置的模块更新器能通知用户有新版模块。
 
@@ -134,15 +138,19 @@ WebUI 默认采用 AMOLED 深色配色。切换按钮会将 `document.documentEl
 ```
 dnscrypt-proxy-root/
 ├── META-INF/                    # Magisk 安装器元数据
-├── .github/workflows/           # CI/CD 自动化
-│   ├── auto-update.yml          # 计划上游检查
-│   └── release.yml              # 标签触发发版
+├── .github/
+│   ├── upstream-version         # 独立记录的 dnscrypt-proxy 版本
+│   └── workflows/               # CI/CD 自动化
+│       ├── auto-update.yml      # 计划上游检查
+│       ├── release.yml          # 经验证的模块版本发版
+│       └── test.yml             # dash/BusyBox ash 测试与 ShellCheck
 ├── config/
 │   └── dnscrypt-proxy.toml      # 默认配置
 ├── scripts/
 │   ├── common.sh                # 共用工具函数
 │   ├── dnscrypt-control.sh      # 服务控制与 WebUI API
 │   └── update-dnscrypt.sh       # 二进制更新器
+├── tests/                        # POSIX sh 更新器回归测试与 mock
 ├── webroot/                     # WebUI 静态文件
 │   ├── index.html
 │   ├── icon.svg
@@ -205,6 +213,16 @@ dnscrypt-proxy-root/
 
 ## 变更日志
 
+### v0.8.0 (2026-08-18)
+
+- 将模块 `vX.X.X` Release 与独立追踪的上游 dnscrypt-proxy 版本分离。
+- 修正更新限流：网络失败或 metadata 格式错误后可立即重试。
+- 使用内核 `flock` 实现异常终止后可安全恢复的更新锁，并涵盖 BusyBox fallback 与旧锁迁移。
+- 明确说明可选 checksum 比对不属于 Minisign 身份验证，且仍为 best-effort。
+- 新增 dash 与 BusyBox ash 下的 POSIX `sh` 更新器测试，并加入 ShellCheck 与 GitHub Actions CI。
+- 统一繁体中文 README 与 WebUI 的域名用语。
+- 旧安装包仍固定使用不可变的 `v0.7.0` 更新描述文件，需手动安装一次 `v0.8.0`；本版已为后续更新切换至稳定描述文件网址。
+
 ### v0.7.0 (2026-07-23)
 
 **新功能**
@@ -222,7 +240,7 @@ dnscrypt-proxy-root/
 **安全性修复**
 - 修复 WebUI 命令注入漏洞，验证所有用户输入（H3）
 - 移除 WebUI 中的第三方分析远端脚本（H4）
-- 新增对下载的 dnscrypt-proxy 二进制文件进行 SHA256 验证，比对上游签名的校验列表
+- 新增 best-effort SHA256 比对，使用同一 release 的校验列表检查下载的 dnscrypt-proxy 压缩包；该列表未经签名验证，校验数据不可用时不会阻止安装
 - 移除时主动清除 DNS 查询日志以保护隐私
 
 **功能性修复**

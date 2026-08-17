@@ -1,0 +1,5 @@
+#!/bin/sh
+set -u
+
+printf 'notify %s\n' "$*" >> "$MOCK_CALL_LOG"
+exit 0

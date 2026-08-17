@@ -1,0 +1,5 @@
+#!/bin/sh
+set -u
+
+[ "${1:-}" = 'ro.product.cpu.abi' ] || exit 1
+printf '%s\n' "$MOCK_ABI"

@@ -1,0 +1,14 @@
+#!/bin/sh
+set -u
+
+last_argument=
+for argument in "$@"; do
+  last_argument=$argument
+done
+
+if [ "$MOCK_MV_MODE" = fail ] && [ "$last_argument" = "$MOCK_INSTALL_TARGET" ]; then
+  printf 'mv-fail %s\n' "$*" >> "$MOCK_CALL_LOG"
+  exit 1
+fi
+
+exec "$MOCK_REAL_MV" "$@"

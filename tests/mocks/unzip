@@ -1,0 +1,37 @@
+#!/bin/sh
+set -u
+
+destination=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -d)
+      shift
+      [ "$#" -gt 0 ] || exit 64
+      destination=$1
+      ;;
+  esac
+  shift
+done
+
+[ -n "$destination" ] || exit 64
+printf 'unzip\n' >> "$MOCK_CALL_LOG"
+
+case "$MOCK_UNZIP_MODE" in
+  success)
+    mkdir -p "$destination/android-test"
+    printf '%s\n' "$MOCK_NEW_BINARY" > "$destination/android-test/dnscrypt-proxy"
+    ;;
+  empty)
+    mkdir -p "$destination/android-test"
+    : > "$destination/android-test/dnscrypt-proxy"
+    ;;
+  missing)
+    :
+    ;;
+  fail)
+    exit 1
+    ;;
+  *)
+    exit 64
+    ;;
+esac

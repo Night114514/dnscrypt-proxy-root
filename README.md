@@ -26,6 +26,7 @@ A systemless Magisk/KernelSU/APatch module that runs **dnscrypt-proxy** on roote
 
 - Android 7.0+ (API 24+)
 - One of: **Magisk 20.4+**, **KernelSU 0.7.0+**, or **APatch 10596+**
+- The updater requires `flock` (provided by Android 7+ Toybox, with a root-manager BusyBox fallback)
 - A device whose kernel supports **iptables NAT** (the case on the vast majority of devices)
 - The WebUI management interface requires KernelSU or APatch (Magisk has no WebUI; on Magisk
   the action button toggles the service instead)
@@ -99,15 +100,24 @@ On each boot, `service.sh` triggers a background update check:
 5. Updates module metadata
 
 The check is rate-limited to once per 24 hours (configurable via `DNSCRYPT_UPDATE_INTERVAL_SECONDS`).
+The rate-limit timestamp is recorded only after the release metadata has been downloaded and a
+non-empty release tag has been parsed, so network and metadata-format failures can be retried on the
+next invocation.
+
+The updater also attempts a best-effort SHA256 comparison using `minisign.txt` downloaded from the
+same release. It does **not** authenticate that checksum list with Minisign or a pinned signing key.
+An actual hash mismatch aborts the update, but installation continues if the list cannot be
+downloaded, the asset has no entry, or no hash can be calculated. This comparison can detect
+accidental corruption when checksum data is available; it does not authenticate the publisher.
 
 ### CI/CD Auto-Update (GitHub Actions)
 
 A scheduled workflow runs monthly (on the 1st of each month, and on demand via `workflow_dispatch`):
 
-1. Checks upstream dnscrypt-proxy releases
-2. If a new version is detected, updates `module.prop` and `update.json`
-3. Builds a new module ZIP
-4. Creates a GitHub Release with the updated assets
+1. Checks upstream dnscrypt-proxy releases against the separately tracked `.github/upstream-version`
+2. If a new upstream version is detected, increments the module's independent `vX.X.X` patch version
+3. Updates `module.prop`, `update.json`, and the tracked upstream version
+4. Builds a runtime-only module ZIP and creates a GitHub Release named after the module version
 
 This enables Magisk's built-in module updater to notify users of new module versions.
 
@@ -155,15 +165,19 @@ addon injected via `webroot/index.html` without modifying the bundled JS/CSS.
 ```
 dnscrypt-proxy-root/
 ├── META-INF/                    # Magisk installer metadata
-├── .github/workflows/           # CI/CD automation
-│   ├── auto-update.yml          # Scheduled upstream check
-│   └── release.yml              # Tag-triggered release
+├── .github/
+│   ├── upstream-version         # Separately tracked dnscrypt-proxy version
+│   └── workflows/               # CI/CD automation
+│       ├── auto-update.yml      # Scheduled upstream check
+│       ├── release.yml          # Validated module-version release
+│       └── test.yml             # dash/BusyBox ash tests and ShellCheck
 ├── config/
 │   └── dnscrypt-proxy.toml      # Default configuration
 ├── scripts/
 │   ├── common.sh                # Shared utilities
 │   ├── dnscrypt-control.sh      # Service control & WebUI API
 │   └── update-dnscrypt.sh       # Binary updater
+├── tests/                        # POSIX sh updater regression suite and mocks
 ├── webroot/                     # WebUI static files
 │   ├── index.html
 │   ├── icon.svg
@@ -230,6 +244,16 @@ Edit via the WebUI Config tab or manually with a text editor.
 
 ## Changelog
 
+### v0.8.0 (2026-08-18)
+
+- Separated module `vX.X.X` releases from the independently tracked upstream dnscrypt-proxy version.
+- Fixed update throttling so failed or malformed metadata requests can be retried immediately.
+- Made updater locking crash-safe with kernel `flock`, including BusyBox fallback and legacy-lock migration.
+- Clarified that the optional checksum comparison is not Minisign authentication and remains best-effort.
+- Added POSIX `sh` updater coverage under dash and BusyBox ash, plus ShellCheck and GitHub Actions CI.
+- Standardized Traditional Chinese domain terminology in the README and WebUI.
+- Existing installations pinned to the immutable `v0.7.0` update descriptor must install `v0.8.0` manually once; this release switches future checks to a stable descriptor URL.
+
 ### v0.7.0 (2026-07-23)
 
 **New features**
@@ -255,8 +279,9 @@ Edit via the WebUI Config tab or manually with a text editor.
 **Security fixes**
 - Fixed a WebUI command-injection vector by validating all user-supplied input (H3)
 - Removed the third-party analytics remote script from the WebUI (H4)
-- Added SHA256 verification of the downloaded dnscrypt-proxy binary against the upstream
-  signed checksum list
+- Added a best-effort SHA256 comparison of the downloaded dnscrypt-proxy archive against a checksum
+  list from the same release. The list is not signature-authenticated, and unavailable checksum data
+  does not block installation.
 - Proactively wipe DNS query logs on uninstall to protect privacy
 
 **Functionality fixes**

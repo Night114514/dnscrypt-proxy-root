@@ -1,0 +1,94 @@
+#!/bin/sh
+
+# BusyBox's standalone shell can resolve built-in applets before PATH. Define
+# functions for the commands present in the isolated fixture so the production
+# script still exercises its injected test doubles under BusyBox ash.
+[ -n "${MOCK_COMMAND_DIR:-}" ] || {
+  echo "MOCK_COMMAND_DIR is required" >&2
+  exit 64
+}
+
+# Keep command discovery scoped to the fixture. In standalone mode BusyBox
+# otherwise reports built-in applets such as wget and sha256sum even after the
+# corresponding mock has intentionally been removed for a fallback test.
+command() {
+  [ "${1:-}" = "-v" ] && [ "$#" -eq 2 ] || return 127
+  case "$2" in
+    busybox) [ -x "$MOCK_COMMAND_DIR/busybox-mock" ] ;;
+    *) [ -x "$MOCK_COMMAND_DIR/$2" ] ;;
+  esac
+}
+
+if [ -x "$MOCK_COMMAND_DIR/awk" ]; then
+  awk() { "$MOCK_COMMAND_DIR/awk" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/cat" ]; then
+  cat() { "$MOCK_COMMAND_DIR/cat" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/chmod" ]; then
+  chmod() { "$MOCK_COMMAND_DIR/chmod" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/cp" ]; then
+  cp() { "$MOCK_COMMAND_DIR/cp" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/flock" ]; then
+  flock() { "$MOCK_COMMAND_DIR/flock" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/grep" ]; then
+  grep() { "$MOCK_COMMAND_DIR/grep" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/head" ]; then
+  head() { "$MOCK_COMMAND_DIR/head" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/ln" ]; then
+  ln() { "$MOCK_COMMAND_DIR/ln" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/mkdir" ]; then
+  mkdir() { "$MOCK_COMMAND_DIR/mkdir" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/mv" ]; then
+  mv() { "$MOCK_COMMAND_DIR/mv" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/rm" ]; then
+  rm() { "$MOCK_COMMAND_DIR/rm" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/rmdir" ]; then
+  rmdir() { "$MOCK_COMMAND_DIR/rmdir" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/sed" ]; then
+  sed() { "$MOCK_COMMAND_DIR/sed" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/sleep" ]; then
+  sleep() { "$MOCK_COMMAND_DIR/sleep" "$@"; }
+fi
+
+if [ -x "$MOCK_COMMAND_DIR/date" ]; then
+  date() { "$MOCK_COMMAND_DIR/date" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/getprop" ]; then
+  getprop() { "$MOCK_COMMAND_DIR/getprop" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/uname" ]; then
+  uname() { "$MOCK_COMMAND_DIR/uname" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/curl" ]; then
+  curl() { "$MOCK_COMMAND_DIR/curl" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/wget" ]; then
+  wget() { "$MOCK_COMMAND_DIR/wget" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/busybox-mock" ]; then
+  busybox() { "$MOCK_COMMAND_DIR/busybox-mock" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/sha256sum" ]; then
+  sha256sum() { "$MOCK_COMMAND_DIR/sha256sum" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/unzip" ]; then
+  unzip() { "$MOCK_COMMAND_DIR/unzip" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/cmd" ]; then
+  cmd() { "$MOCK_COMMAND_DIR/cmd" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/su" ]; then
+  su() { "$MOCK_COMMAND_DIR/su" "$@"; }
+fi

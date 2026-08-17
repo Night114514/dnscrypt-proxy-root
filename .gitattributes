@@ -1,0 +1,9 @@
+/.gitattributes text eol=lf
+*.md text eol=crlf
+*.sh text eol=lf
+module.prop text eol=lf
+update.json text eol=lf
+.github/upstream-version text eol=lf
+tests/mocks/* text eol=lf
+META-INF/com/google/android/update-binary text eol=lf
+.github/workflows/*.yml text eol=lf

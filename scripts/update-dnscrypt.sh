@@ -3,28 +3,115 @@ set -u
 
 SCRIPT_DIR=${0%/*}
 MODDIR=$(cd "$SCRIPT_DIR/.." 2>/dev/null && pwd)
+# The runtime module path is dynamic by design; common.sh is linted separately.
+# shellcheck disable=SC1091
 . "$MODDIR/scripts/common.sh"
 
 MODE="${1:-auto}"
 CHECK_INTERVAL_SECONDS="${DNSCRYPT_UPDATE_INTERVAL_SECONDS:-86400}"
 LAST_CHECK_FILE="$RUN_DIR/last-update-check"
 LOCK_FILE="$RUN_DIR/update.lock"
+LOCK_GUARD_FILE="$RUN_DIR/update.lock.guard"
+LEGACY_REAP_FILE="$RUN_DIR/update.lock.reap"
+LOCK_OWNER="flock:$$"
 
 mkdir -p "$RUN_DIR" "$LOG_DIR" "$TMP_BASE"
 
-finish() {
-  rm -f "$LOCK_FILE"
-}
-trap finish EXIT HUP INT TERM
+LOCK_OWNED=0
+LOCK_FD_OPEN=0
 
-if [ -f "$LOCK_FILE" ]; then
-  old_pid=$(cat "$LOCK_FILE" 2>/dev/null)
-  if [ -n "$old_pid" ] && kill -0 "$old_pid" >/dev/null 2>&1; then
+finish() {
+  if [ "$LOCK_OWNED" -eq 1 ]; then
+    lock_owner=$(cat "$LOCK_FILE" 2>/dev/null || true)
+    if [ "$lock_owner" = "$LOCK_OWNER" ]; then
+      rm -f "$LOCK_FILE"
+    fi
+    LOCK_OWNED=0
+  fi
+  if [ "$LOCK_FD_OPEN" -eq 1 ]; then
+    exec 9>&-
+    LOCK_FD_OPEN=0
+  fi
+}
+trap finish 0
+trap 'finish; exit 129' HUP
+trap 'finish; exit 130' INT
+trap 'finish; exit 143' TERM
+
+lock_fd_nonblocking() {
+  if has_cmd flock; then
+    flock -n "$1"
+    return $?
+  fi
+  busybox_cmd flock -n "$1"
+}
+
+acquire_update_lock() {
+  # Android 7+ Toybox provides flock.  The root-manager BusyBox is a fallback.
+  # The stable inode must never be unlinked: the kernel releases its advisory
+  # lock automatically when this shell and all inherited descriptors exit.
+  if ! exec 9>> "$LOCK_GUARD_FILE"; then
+    return 1
+  fi
+  LOCK_FD_OPEN=1
+
+  lock_fd_nonblocking 9
+  flock_status=$?
+  case "$flock_status" in
+    0) ;;
+    1)
+      exec 9>&-
+      LOCK_FD_OPEN=0
+      return 2
+      ;;
+    *)
+      exec 9>&-
+      LOCK_FD_OPEN=0
+      return 1
+      ;;
+  esac
+
+  # A running pre-flock updater only owns the PID marker.  Respect it during a
+  # live script upgrade so old and new installers cannot replace the binary at
+  # the same time.  Dead, empty, and malformed markers are migration residue.
+  legacy_owner=$(cat "$LOCK_FILE" 2>/dev/null || true)
+  case "$legacy_owner" in
+    ''|0*|*[!0-9]*) ;;
+    *)
+      if [ "$legacy_owner" != "$$" ] && kill -0 "$legacy_owner" >/dev/null 2>&1; then
+        exec 9>&-
+        LOCK_FD_OPEN=0
+        return 2
+      fi
+      ;;
+  esac
+
+  # Remove an abandoned gate from the short-lived hard-link implementation only
+  # after the kernel lock is held.  A stale diagnostic marker is overwritten.
+  rm -f "$LEGACY_REAP_FILE"
+
+  if ! printf '%s\n' "$LOCK_OWNER" > "$LOCK_FILE"; then
+    exec 9>&-
+    LOCK_FD_OPEN=0
+    return 1
+  fi
+  LOCK_OWNED=1
+  return 0
+}
+
+acquire_update_lock
+lock_status=$?
+case "$lock_status" in
+  0) ;;
+  2)
     echo "Another update process is running."
     exit 2
-  fi
-fi
-echo $$ > "$LOCK_FILE"
+    ;;
+  *)
+    echo "Failed to acquire update lock."
+    exit 1
+    ;;
+esac
 
 should_skip_auto_check() {
   [ "$MODE" = "auto" ] || return 1
@@ -41,8 +128,6 @@ if should_skip_auto_check; then
   echo "skip: checked recently"
   exit 0
 fi
-
-date +%s > "$LAST_CHECK_FILE" 2>/dev/null || true
 
 ARCH_ASSET=$(asset_arch_name)
 if [ "$ARCH_ASSET" = "unknown" ]; then
@@ -79,6 +164,8 @@ if [ -z "$LATEST_VERSION" ]; then
   exit 1
 fi
 
+date +%s > "$LAST_CHECK_FILE" 2>/dev/null || true
+
 CURRENT_VERSION=$(installed_version)
 ASSET_URL=$(make_asset_url "$LATEST_VERSION" "$ARCH_ASSET")
 
@@ -110,10 +197,11 @@ if ! download_file "$ASSET_URL" "$ZIP_FILE"; then
   exit 1
 fi
 
-# Verify the downloaded archive against the upstream minisign-signed SHA256 list to
-# guard against supply-chain tampering. dnscrypt-proxy publishes a "minisign.txt"
-# alongside each release that lists "<sha256>  <filename>" entries.
-SHA_VERIFIED=0
+# Best-effort integrity comparison only: when a "minisign.txt" checksum list is
+# available, compare its SHA256 entry with the downloaded archive. This list is
+# fetched from the same release and is not authenticated with Minisign. Missing
+# checksum data therefore fails open and installation continues.
+SHA_MATCHED=0
 SHA_FILE="$WORK/minisign.txt"
 SHA_URL="$UPSTREAM_RELEASE_BASE/$LATEST_VERSION/minisign.txt"
 if download_file "$SHA_URL" "$SHA_FILE" && [ -s "$SHA_FILE" ]; then
@@ -129,13 +217,13 @@ if download_file "$SHA_URL" "$SHA_FILE" && [ -s "$SHA_FILE" ]; then
       echo "$msg"
       exit 1
     fi
-    SHA_VERIFIED=1
-    log_msg "$UPDATE_LOG" "SHA256 verified for $ASSET_NAME."
+    SHA_MATCHED=1
+    log_msg "$UPDATE_LOG" "SHA256 matched for $ASSET_NAME; checksum list is not signature-authenticated."
   else
-    log_msg "$UPDATE_LOG" "SHA256 entry unavailable for $ASSET_NAME; skipping hash check."
+    log_msg "$UPDATE_LOG" "SHA256 entry unavailable for $ASSET_NAME; continuing without checksum comparison."
   fi
 else
-  log_msg "$UPDATE_LOG" "Could not fetch checksum list; skipping hash check."
+  log_msg "$UPDATE_LOG" "Could not fetch checksum list; continuing without checksum comparison."
 fi
 
 if ! unzip_file "$ZIP_FILE" "$EXTRACT_DIR"; then
@@ -182,12 +270,21 @@ cp -af "$NEW_BIN" "$DNSCRYPT_BIN.tmp" || {
   msg="Failed to copy new dnscrypt-proxy binary."
   write_update_status "error" "$LATEST_VERSION" "$msg"
   log_msg "$UPDATE_LOG" "$msg"
+  rm -f "$DNSCRYPT_BIN.tmp"
   rm -rf "$WORK"
   echo "$msg"
   exit 1
 }
 chmod 0755 "$DNSCRYPT_BIN.tmp" 2>/dev/null || true
-mv -f "$DNSCRYPT_BIN.tmp" "$DNSCRYPT_BIN"
+if ! mv -f "$DNSCRYPT_BIN.tmp" "$DNSCRYPT_BIN"; then
+  msg="Failed to install new dnscrypt-proxy binary."
+  write_update_status "error" "$LATEST_VERSION" "$msg"
+  log_msg "$UPDATE_LOG" "$msg"
+  rm -f "$DNSCRYPT_BIN.tmp"
+  rm -rf "$WORK"
+  echo "$msg"
+  exit 1
+fi
 echo "$LATEST_VERSION" > "$INSTALLED_VERSION_FILE"
 update_module_description "$LATEST_VERSION"
 
@@ -195,8 +292,8 @@ msg="Installed dnscrypt-proxy $LATEST_VERSION for $ARCH_ASSET."
 write_update_status "updated" "$LATEST_VERSION" "$msg"
 log_msg "$UPDATE_LOG" "$msg"
 # Notify only on a successful update; failures stay silent (log only) to avoid noise.
-if [ "$SHA_VERIFIED" -eq 1 ]; then
-  notify_user "dnscrypt-proxy 已更新" "已更新至 $LATEST_VERSION，SHA256 驗證通過"
+if [ "$SHA_MATCHED" -eq 1 ]; then
+  notify_user "dnscrypt-proxy 已更新" "已更新至 $LATEST_VERSION，SHA256 比對相符"
 else
   notify_user "dnscrypt-proxy 已更新" "已更新至 $LATEST_VERSION"
 fi

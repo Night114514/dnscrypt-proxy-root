@@ -26,6 +26,7 @@
 
 - Android 7.0 以上（API 24+）
 - 下列其一：**Magisk 20.4+**、**KernelSU 0.7.0+** 或 **APatch 10596+**
+- 更新器需要 `flock`（Android 7+ 的 Toybox 已提供；若系統命令不可用，會改用 root 管理器的 BusyBox）
 - 核心需支援 **iptables NAT**（絕大多數裝置皆支援）
 - WebUI 管理介面需要 KernelSU 或 APatch（Magisk 沒有 WebUI；在 Magisk 上，action 按鈕改為切換服務開關）
 
@@ -51,7 +52,7 @@
 | **設定 (Config)** | 以語法高亮編輯 `dnscrypt-proxy.toml` |
 | **封鎖清單 (Blocklist)** | 圖形化網域封鎖／允許清單編輯器 |
 | **統計 (Stats)** | DNS 查詢統計（總查詢數、封鎖率、熱門網域、每小時時間軸） |
-| **DNS 測試 (DNS Test)** | 比較 dnscrypt-proxy 與直接 DNS 的域名解析與延遲，並可執行 **DNS 洩漏檢測** *(v0.7.0)* |
+| **DNS 測試 (DNS Test)** | 比較 dnscrypt-proxy 與直接 DNS 的網域名稱解析與延遲，並可執行 **DNS 洩漏檢測** *(v0.7.0)* |
 | **解析器 (Resolvers)** | 圖形化 DNS 伺服器選擇器，附協定／功能標籤 |
 | **日誌 (Logs)** | 即時服務與查詢日誌 |
 | **更新 (Update)** | 檢查並安裝上游二進位更新 |
@@ -87,15 +88,18 @@ WebUI 支援 **English**、**繁體中文** 與 **简体中文**，並依系統�
 5. 更新模組中繼資料
 
 檢查頻率限制為每 24 小時一次（可透過 `DNSCRYPT_UPDATE_INTERVAL_SECONDS` 設定）。
+只有成功下載 release metadata 並解析出非空 release tag 後，才會記錄限流時間；網路失敗或 metadata 格式錯誤可在下次呼叫時立即重試。
+
+更新器也會嘗試使用同一 release 下載的 `minisign.txt` 進行 best-effort SHA256 比對。程式**不會**以 Minisign 或釘選公鑰驗證該檢查碼清單。實際雜湊不符會中止更新；但清單下載失敗、找不到資產項目或無法計算雜湊時，仍會繼續安裝。此比對只能在檢查碼可用時偵測意外毀損，不能驗證發布者身分。
 
 ### CI/CD 自動更新（GitHub Actions）
 
 排程工作流程每月執行一次（每月 1 號，亦可透過 `workflow_dispatch` 手動觸發）：
 
-1. 檢查上游 dnscrypt-proxy releases
-2. 若偵測到新版，更新 `module.prop` 與 `update.json`
-3. 建置新的模組 ZIP
-4. 建立含更新 asset 的 GitHub Release
+1. 將上游 dnscrypt-proxy release 與獨立記錄的 `.github/upstream-version` 比較
+2. 若偵測到新的上游版本，遞增模組本身獨立的 `vX.X.X` patch 版本
+3. 更新 `module.prop`、`update.json` 與上游版本記錄
+4. 建置僅含執行階段檔案的模組 ZIP，並以模組版本命名 GitHub Release
 
 這讓 Magisk 內建的模組更新器能通知使用者有新版模組。
 
@@ -103,9 +107,9 @@ WebUI 支援 **English**、**繁體中文** 與 **简体中文**，並依系統�
 
 DNS 測試頁面新增了 **洩漏檢測** 按鈕。按下後，後端（`dnscrypt-control.sh leak-test`）會：
 
-1. 產生 4 個隨機的 `[a-z0-9-]` 子域名。
+1. 產生 4 個隨機的 `[a-z0-9-]` 子網域。
 2. **透過系統 DNS 路徑**解析每一個（而非直接連向 dnscrypt-proxy），模擬一般 App 受 iptables 重導向的查詢。
-3. 稍待片刻後，在 dnscrypt-proxy 的查詢日誌（以及 `nx.log`）中比對每個子域名。
+3. 稍待片刻後，在 dnscrypt-proxy 的查詢日誌（以及 `nx.log`）中比對每個子網域。
 4. 以單行 JSON 回報判定：
    - `protected` — 4 個全部出現在日誌中；DNS 流量確實經過 dnscrypt-proxy。
    - `partial` — 部分出現；可能有部分洩漏。
@@ -134,15 +138,19 @@ WebUI 預設採用 AMOLED 深色配色。切換按鈕會將 `document.documentEl
 ```
 dnscrypt-proxy-root/
 ├── META-INF/                    # Magisk 安裝器中繼資料
-├── .github/workflows/           # CI/CD 自動化
-│   ├── auto-update.yml          # 排程上游檢查
-│   └── release.yml              # 標籤觸發發版
+├── .github/
+│   ├── upstream-version         # 獨立記錄的 dnscrypt-proxy 版本
+│   └── workflows/               # CI/CD 自動化
+│       ├── auto-update.yml      # 排程上游檢查
+│       ├── release.yml          # 經驗證的模組版本發版
+│       └── test.yml             # dash/BusyBox ash 測試與 ShellCheck
 ├── config/
 │   └── dnscrypt-proxy.toml      # 預設設定
 ├── scripts/
 │   ├── common.sh                # 共用工具函式
 │   ├── dnscrypt-control.sh      # 服務控制與 WebUI API
 │   └── update-dnscrypt.sh       # 二進位更新器
+├── tests/                        # POSIX sh 更新器回歸測試與 mock
 ├── webroot/                     # WebUI 靜態檔案
 │   ├── index.html
 │   ├── icon.svg
@@ -205,10 +213,20 @@ dnscrypt-proxy-root/
 
 ## 變更紀錄
 
+### v0.8.0 (2026-08-18)
+
+- 將模組 `vX.X.X` Release 與獨立追蹤的上游 dnscrypt-proxy 版本分離。
+- 修正更新限流：網路失敗或 metadata 格式錯誤後可立即重試。
+- 使用核心 `flock` 實作異常終止後可安全恢復的更新鎖，並涵蓋 BusyBox fallback 與舊鎖遷移。
+- 明確說明可選 checksum 比對不屬於 Minisign 身分驗證，且仍為 best-effort。
+- 新增 dash 與 BusyBox ash 下的 POSIX `sh` 更新器測試，並加入 ShellCheck 與 GitHub Actions CI。
+- 統一繁體中文 README 與 WebUI 的網域用語。
+- 舊安裝包仍固定使用不可變的 `v0.7.0` 更新描述檔，需手動安裝一次 `v0.8.0`；本版已為後續更新切換至穩定描述檔網址。
+
 ### v0.7.0 (2026-07-23)
 
 **新功能**
-- **DNS 洩漏檢測**：新增 `leak-test` 命令與 WebUI 按鈕，透過系統 DNS 路徑解析隨機子域名，並檢查查詢日誌以確認流量已加密（protected／partial／leaking 判定）。
+- **DNS 洩漏檢測**：新增 `leak-test` 命令與 WebUI 按鈕，透過系統 DNS 路徑解析隨機子網域，並檢查查詢日誌以確認流量已加密（protected／partial／leaking 判定）。
 - **服務監控 + Android 通知**：`service.sh` 每 60 秒監控 daemon，異常停止時自動重啟一次，並透過 `cmd notification post` 通知（每次開機上限 3 次，並以「使用者停止」標記避免誤報）。二進位更新成功時亦會通知。
 - **深色／淺色主題切換**：WebUI 切換按鈕，具 `localStorage` 持久化，預設為 AMOLED 深色配色。
 
@@ -222,7 +240,7 @@ dnscrypt-proxy-root/
 **安全性修復**
 - 修復 WebUI 命令注入漏洞，驗證所有使用者輸入（H3）
 - 移除 WebUI 中的第三方分析遠端腳本（H4）
-- 新增對下載的 dnscrypt-proxy 二進位檔進行 SHA256 驗證，比對上游簽署的校驗清單
+- 新增 best-effort SHA256 比對，使用同一 release 的檢查碼清單檢查下載的 dnscrypt-proxy 壓縮檔；該清單未經簽章驗證，檢查碼不可用時不會阻止安裝
 - 移除時主動清除 DNS 查詢日誌以保護隱私
 
 **功能性修復**

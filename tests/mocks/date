@@ -1,0 +1,12 @@
+#!/bin/sh
+set -u
+
+case "${1:-}" in
+  +%s)
+    [ "$MOCK_DATE_MODE" = success ] || exit 1
+    printf '%s\n' "$MOCK_NOW"
+    ;;
+  *)
+    printf '%s\n' '2026-08-03 00:00:00'
+    ;;
+esac
