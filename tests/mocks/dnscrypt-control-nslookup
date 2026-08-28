@@ -1,0 +1,8 @@
+#!/bin/sh
+set -u
+
+query_name=${1:-}
+[ -n "$query_name" ] || exit 64
+printf 'nslookup %s\n' "$*" >> "$MOCK_CALL_LOG"
+[ -n "${MOCK_NX_LOG:-}" ] && printf '%s\n' "$query_name" >> "$MOCK_NX_LOG"
+exit "${MOCK_NSLOOKUP_STATUS:-0}"

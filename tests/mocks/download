@@ -26,9 +26,22 @@ printf '%s %s\n' "$tool_name" "$download_url" >> "$MOCK_CALL_LOG"
 
 case "$download_url" in
   "$MOCK_UPSTREAM_API")
+    case "$MOCK_CHECKSUM_MODE" in
+      match) metadata_digest="sha256:$MOCK_ACTUAL_SHA"; metadata_name="$MOCK_ASSET_NAME" ;;
+      mismatch) metadata_digest='sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'; metadata_name="$MOCK_ASSET_NAME" ;;
+      missing-entry) metadata_digest="sha256:$MOCK_ACTUAL_SHA"; metadata_name='dnscrypt-proxy-other.zip' ;;
+      malformed-digest) metadata_digest='sha256:not-a-digest'; metadata_name="$MOCK_ASSET_NAME" ;;
+      missing-digest) metadata_digest='null'; metadata_name="$MOCK_ASSET_NAME" ;;
+      *) metadata_digest="sha256:$MOCK_ACTUAL_SHA"; metadata_name="$MOCK_ASSET_NAME" ;;
+    esac
     case "$MOCK_METADATA_MODE" in
       success)
-        printf '{"tag_name":"%s"}\n' "$MOCK_LATEST_VERSION" > "$output_file"
+        printf '{\n  "tag_name": "%s",\n  "assets": [\n    {\n      "name": "%s",\n      "uploader": {"login": "fixture"},\n      "digest": "%s"\n    }\n  ]\n}\n' \
+          "$MOCK_LATEST_VERSION" "$metadata_name" "$metadata_digest" > "$output_file"
+        ;;
+      compact)
+        printf '{"tag_name":"%s","assets":[{"url":"asset","name":"%s","uploader":{"name":"fixture","note":"brace } inside string"},"digest":"%s"},{"url":"other","name":"dnscrypt-proxy-other.zip","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}\n' \
+          "$MOCK_LATEST_VERSION" "$metadata_name" "$metadata_digest" > "$output_file"
         ;;
       wait-success)
         : > "$MOCK_WAIT_READY"
@@ -38,32 +51,11 @@ case "$download_url" in
           [ "$wait_count" -le 500 ] || exit 70
           "$MOCK_HOST_SLEEP" 0.02
         done
-        printf '{"tag_name":"%s"}\n' "$MOCK_LATEST_VERSION" > "$output_file"
+        printf '{\n  "tag_name": "%s",\n  "assets": [\n    {\n      "name": "%s",\n      "digest": "%s"\n    }\n  ]\n}\n' \
+          "$MOCK_LATEST_VERSION" "$metadata_name" "$metadata_digest" > "$output_file"
         ;;
       malformed)
         printf '{"name":"missing tag"}\n' > "$output_file"
-        ;;
-      fail)
-        exit 22
-        ;;
-      *)
-        exit 64
-        ;;
-    esac
-    ;;
-  */minisign.txt)
-    case "$MOCK_CHECKSUM_MODE" in
-      match)
-        printf '%s  %s\n' "$MOCK_ACTUAL_SHA" "$MOCK_ASSET_NAME" > "$output_file"
-        ;;
-      mismatch)
-        printf '%s  %s\n' 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$MOCK_ASSET_NAME" > "$output_file"
-        ;;
-      missing-entry)
-        printf '%s  %s\n' "$MOCK_ACTUAL_SHA" 'dnscrypt-proxy-other.zip' > "$output_file"
-        ;;
-      empty)
-        : > "$output_file"
         ;;
       fail)
         exit 22

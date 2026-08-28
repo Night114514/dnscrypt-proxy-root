@@ -92,3 +92,15 @@ fi
 if [ -x "$MOCK_COMMAND_DIR/su" ]; then
   su() { "$MOCK_COMMAND_DIR/su" "$@"; }
 fi
+if [ -x "$MOCK_COMMAND_DIR/nslookup" ]; then
+  nslookup() { "$MOCK_COMMAND_DIR/nslookup" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/iptables" ]; then
+  iptables() { "$MOCK_COMMAND_DIR/iptables" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/ip6tables" ]; then
+  ip6tables() { "$MOCK_COMMAND_DIR/ip6tables" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/sysctl" ]; then
+  sysctl() { "$MOCK_COMMAND_DIR/sysctl" "$@"; }
+fi

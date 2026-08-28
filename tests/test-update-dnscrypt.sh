@@ -26,6 +26,7 @@ HOST_SH=$(find_host_tool sh 2>/dev/null || true)
 HOST_DASH=$(find_host_tool dash 2>/dev/null || true)
 HOST_BUSYBOX=$(find_host_tool busybox 2>/dev/null || true)
 HOST_MV=$(find_host_tool mv 2>/dev/null || true)
+HOST_READLINK=$(find_host_tool readlink 2>/dev/null || true)
 HOST_SLEEP=$(find_host_tool sleep 2>/dev/null || true)
 HOST_ENV=$(find_host_tool env 2>/dev/null || true)
 HOST_FLOCK=$(find_host_tool flock 2>/dev/null || true)
@@ -37,6 +38,10 @@ TEST_SHELL_KIND=${TEST_SHELL_KIND:-sh}
 }
 [ -n "$HOST_FLOCK" ] || {
   echo "flock is required" >&2
+  exit 2
+}
+[ -n "$HOST_READLINK" ] || {
+  echo "readlink is required" >&2
   exit 2
 }
 
@@ -117,7 +122,8 @@ link_host_tool() {
   LINK_NAME=$1
   LINK_SOURCE=$(find_host_tool "$LINK_NAME" 2>/dev/null || true)
   [ -n "$LINK_SOURCE" ] || return 1
-  ln -s "$LINK_SOURCE" "$TOOL_BIN/$LINK_NAME"
+  printf '#!/bin/sh\nexec "%s" "$@"\n' "$LINK_SOURCE" > "$TOOL_BIN/$LINK_NAME"
+  chmod 0755 "$TOOL_BIN/$LINK_NAME"
 }
 
 install_mock() {
@@ -129,7 +135,7 @@ install_mock() {
 
 install_busybox_mock() {
   install_mock busybox busybox-mock
-  ln -s busybox-mock "$TOOL_BIN/busybox"
+  cp "$TOOL_BIN/busybox-mock" "$TOOL_BIN/busybox"
 }
 
 setup_fixture() {
@@ -140,20 +146,23 @@ setup_fixture() {
   MOCK_DOWNLOAD_HELPER="$CASE_DIR/download-helper"
   MOCK_WAIT_READY="$CASE_DIR/download-ready"
   MOCK_WAIT_RELEASE="$CASE_DIR/download-release"
+  DNSCRYPT_PROC_ROOT="$CASE_DIR/proc"
   BUSYBOX_UPDATE_SCRIPT="$MODULE_DIR/scripts/update-dnscrypt-busybox.sh"
 
   mkdir -p "$MODULE_DIR/scripts" "$MODULE_DIR/bin" "$MODULE_DIR/config" \
-    "$MODULE_DIR/run" "$MODULE_DIR/logs" "$MODULE_DIR/tmp" "$TOOL_BIN"
+    "$MODULE_DIR/run" "$MODULE_DIR/logs" "$MODULE_DIR/tmp" "$DNSCRYPT_PROC_ROOT" "$TOOL_BIN"
   sed 's/\r$//' "$ROOT_DIR/scripts/common.sh" > "$MODULE_DIR/scripts/common.sh"
   sed 's/\r$//' "$ROOT_DIR/scripts/update-dnscrypt.sh" > "$MODULE_DIR/scripts/update-dnscrypt.sh"
   sed 's/\r$//' "$MOCK_SOURCE_DIR/busybox-ash-prelude" > "$BUSYBOX_UPDATE_SCRIPT"
   sed '1d; s/\r$//' "$ROOT_DIR/scripts/update-dnscrypt.sh" >> "$BUSYBOX_UPDATE_SCRIPT"
+  sed 's/\r$//' "$MOCK_SOURCE_DIR/dnscrypt-control-updater" > "$MODULE_DIR/scripts/dnscrypt-control.sh"
+  chmod 0755 "$MODULE_DIR/scripts/dnscrypt-control.sh"
   sed 's/\r$//' "$ROOT_DIR/module.prop" > "$MODULE_DIR/module.prop"
   sed 's/\r$//' "$MOCK_SOURCE_DIR/download" > "$MOCK_DOWNLOAD_HELPER"
   chmod 0755 "$MOCK_DOWNLOAD_HELPER"
   : > "$MOCK_CALL_LOG"
 
-  for FIXTURE_TOOL in awk cat chmod cp flock grep head ln mkdir mv rm rmdir sed sleep; do
+  for FIXTURE_TOOL in awk cat chmod cp flock grep head ln mkdir mv readlink rm rmdir sed sh sleep tr; do
     link_host_tool "$FIXTURE_TOOL" || return 1
   done
 
@@ -183,8 +192,12 @@ setup_fixture() {
   MOCK_ABI='arm64-v8a'
   MOCK_UNAME='aarch64'
   MOCK_ACTUAL_SHA='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-  MOCK_NEW_BINARY='new dnscrypt binary'
+  MOCK_INNER_DIR='android-arm64'
+  MOCK_BINARY_MODE=success
+  MOCK_BINARY_VERSION="$MOCK_LATEST_VERSION"
   MOCK_INSTALL_TARGET="$MODULE_DIR/bin/dnscrypt-proxy"
+  MOCK_CONTROL_LOCK_FILE="$MODULE_DIR/run/control.lock"
+  MOCK_CONTROL_MODE=success
   DNSCRYPT_UPDATE_INTERVAL_SECONDS=86400
 
   export MOCK_HOST_SH MOCK_HOST_FLOCK MOCK_HOST_SLEEP MOCK_REAL_MV MOCK_CALL_LOG MOCK_DOWNLOAD_HELPER
@@ -192,7 +205,8 @@ setup_fixture() {
   export MOCK_UPSTREAM_API MOCK_LATEST_VERSION MOCK_ASSET_NAME
   export MOCK_METADATA_MODE MOCK_ASSET_MODE MOCK_CHECKSUM_MODE MOCK_UNZIP_MODE
   export MOCK_MV_MODE MOCK_DATE_MODE MOCK_NOW MOCK_ABI MOCK_UNAME
-  export MOCK_ACTUAL_SHA MOCK_NEW_BINARY MOCK_INSTALL_TARGET
+  export MOCK_ACTUAL_SHA MOCK_INNER_DIR MOCK_BINARY_MODE MOCK_BINARY_VERSION MOCK_INSTALL_TARGET
+  export MOCK_CONTROL_LOCK_FILE MOCK_CONTROL_MODE DNSCRYPT_PROC_ROOT
   export DNSCRYPT_UPDATE_INTERVAL_SECONDS
 
   trap 'rm -rf "$CASE_DIR"' 0 HUP INT TERM
@@ -290,6 +304,15 @@ make_old_install() {
   chmod 0755 "$MODULE_DIR/bin/dnscrypt-proxy"
 }
 
+make_fake_running_install() {
+  make_old_install || return 1
+  mkdir -p "$DNSCRYPT_PROC_ROOT/$$"
+  printf '%s\0%s\0%s\0' \
+    "$MODULE_DIR/bin/dnscrypt-proxy" '-config' "$MODULE_DIR/config/dnscrypt-proxy.toml" \
+    > "$DNSCRYPT_PROC_ROOT/$$/cmdline"
+  printf '%s\n' "$$" > "$MODULE_DIR/run/dnscrypt-proxy.pid"
+}
+
 api_call_count() {
   grep -F -c "$MOCK_UPSTREAM_API" "$MOCK_CALL_LOG" 2>/dev/null || true
 }
@@ -319,6 +342,71 @@ test_all_abi_mappings() {
     ABI_ACTUAL=$(run_common asset_arch_name) || return 1
     assert_eq "$ABI_EXPECTED" "$ABI_ACTUAL" "ABI mapping failed for $MOCK_ABI" || return 1
   done
+}
+
+test_asset_digest_parser_handles_compact_json() {
+  setup_fixture || return 1
+  COMPACT_JSON="$CASE_DIR/compact-release.json"
+  printf '%s\n' \
+    '{"tag_name":"9.9.9","assets":[{"url":"one","name":"target.zip","uploader":{"name":"fixture","note":"brace } in string"},"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},{"url":"two","name":"next.zip","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}' \
+    > "$COMPACT_JSON"
+
+  PARSED_DIGEST=$(run_common extract_asset_sha256 "$COMPACT_JSON" target.zip) || return 1
+  assert_eq 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+    "$PARSED_DIGEST" 'compact GitHub JSON digest was not associated with the target asset' || return 1
+
+  MISSING_DIGEST=$(run_common extract_asset_sha256 "$COMPACT_JSON" missing.zip) || return 1
+  assert_eq '' "$MISSING_DIGEST" 'missing target incorrectly consumed a later asset digest' || return 1
+
+  printf '%s\n' \
+    '{"assets":[{"name":"target.zip","digest":null},{"name":"next.zip","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}' \
+    > "$COMPACT_JSON"
+  NULL_DIGEST=$(run_common extract_asset_sha256 "$COMPACT_JSON" target.zip) || return 1
+  assert_eq '' "$NULL_DIGEST" 'null target digest incorrectly consumed the next asset digest' || return 1
+}
+
+test_unknown_mode_aborts_before_network() {
+  setup_fixture || return 1
+
+  MODE_OUTPUT=$(run_update chek 2>&1)
+  MODE_STATUS=$?
+
+  assert_eq 64 "$MODE_STATUS" 'unknown updater mode should be a usage error' || return 1
+  assert_contains "$MODE_OUTPUT" 'Unknown update mode: chek' 'unknown-mode reason missing' || return 1
+  assert_eq 0 "$(api_call_count)" 'unknown mode should not contact GitHub' || return 1
+  assert_not_exists "$MODULE_DIR/run/last-update-check" 'unknown mode should not create cooldown state' || return 1
+}
+
+test_malformed_cooldown_marker_is_ignored() {
+  setup_fixture || return 1
+  make_current_install
+  printf '%s\n' 'not-an-epoch' > "$MODULE_DIR/run/last-update-check"
+
+  COOLDOWN_OUTPUT=$(run_update auto 2>&1)
+  COOLDOWN_STATUS=$?
+
+  assert_eq 0 "$COOLDOWN_STATUS" 'malformed cooldown marker should trigger a normal recheck' || return 1
+  assert_contains "$COOLDOWN_OUTPUT" 'Already up to date' 'malformed cooldown marker skipped the recheck' || return 1
+  assert_eq 1 "$(api_call_count)" 'malformed cooldown marker did not contact GitHub' || return 1
+}
+
+test_overflow_and_future_cooldown_markers_are_ignored() {
+  setup_fixture || return 1
+  make_current_install
+  printf '%s\n' '999999999999999999999999999999999999' > "$MODULE_DIR/run/last-update-check"
+
+  OVERFLOW_OUTPUT=$(run_update auto 2>&1)
+  OVERFLOW_STATUS=$?
+  assert_eq 0 "$OVERFLOW_STATUS" 'overflow cooldown marker should not abort the updater' || return 1
+  assert_contains "$OVERFLOW_OUTPUT" 'Already up to date' 'overflow cooldown marker was not ignored' || return 1
+
+  : > "$MOCK_CALL_LOG"
+  printf '%s\n' '999999999999' > "$MODULE_DIR/run/last-update-check"
+  FUTURE_OUTPUT=$(run_update auto 2>&1)
+  FUTURE_STATUS=$?
+  assert_eq 0 "$FUTURE_STATUS" 'future cooldown marker should trigger a normal recheck' || return 1
+  assert_contains "$FUTURE_OUTPUT" 'Already up to date' 'clock rollback/future marker incorrectly skipped the check' || return 1
+  assert_eq 1 "$(api_call_count)" 'future cooldown marker did not recheck GitHub' || return 1
 }
 
 test_unknown_abi_aborts_before_network() {
@@ -681,8 +769,104 @@ test_checksum_match_installs() {
 
   assert_eq 0 "$MATCH_STATUS" 'matching checksum should allow installation' || return 1
   assert_contains "$MATCH_OUTPUT" 'Installed dnscrypt-proxy' 'successful install message missing' || return 1
-  assert_file_contains "$MODULE_DIR/logs/update.log" 'SHA256 matched for' 'hash match should be described as a match' || return 1
-  assert_eq "$MOCK_NEW_BINARY" "$(cat "$MODULE_DIR/bin/dnscrypt-proxy")" 'new binary was not installed' || return 1
+  assert_file_contains "$MODULE_DIR/logs/update.log" 'GitHub release-asset SHA256 matched for' 'hash match should be described as a match' || return 1
+  assert_file_contains "$MODULE_DIR/bin/dnscrypt-proxy" '# mock dnscrypt binary' 'new binary was not installed' || return 1
+}
+
+test_compact_release_metadata_installs() {
+  setup_fixture || return 1
+  MOCK_METADATA_MODE=compact
+  export MOCK_METADATA_MODE
+
+  COMPACT_OUTPUT=$(run_update force 2>&1)
+  COMPACT_STATUS=$?
+
+  assert_eq 0 "$COMPACT_STATUS" 'compact GitHub release JSON should install successfully' || return 1
+  assert_contains "$COMPACT_OUTPUT" 'Installed dnscrypt-proxy' 'compact metadata install did not complete' || return 1
+  assert_file_contains "$MODULE_DIR/bin/dnscrypt-proxy" '# mock dnscrypt binary' 'compact metadata installed no binary' || return 1
+}
+
+test_control_lock_contention_aborts_before_commit() {
+  setup_fixture || return 1
+  make_old_install
+  exec 7>> "$MODULE_DIR/run/control.lock" || return 1
+  "$HOST_FLOCK" -n 7 || return 1
+  printf '%s\n' '#!/bin/sh' 'exit 0' > "$TOOL_BIN/sleep"
+  chmod 0755 "$TOOL_BIN/sleep"
+
+  CONTROL_OUTPUT=$(run_update force 2>&1)
+  CONTROL_STATUS=$?
+  exec 7>&-
+
+  assert_eq 2 "$CONTROL_STATUS" 'busy control transaction should defer the updater' || return 1
+  assert_contains "$CONTROL_OUTPUT" 'control operation remained active' 'control contention reason missing' || return 1
+  assert_eq 'old dnscrypt binary' "$(cat "$MODULE_DIR/bin/dnscrypt-proxy")" 'control contention replaced the binary' || return 1
+  assert_eq '1.0.0' "$(cat "$MODULE_DIR/run/installed-version")" 'control contention advanced the version marker' || return 1
+  assert_not_exists "$MODULE_DIR/run/last-update-check" 'control contention created a cooldown' || return 1
+}
+
+test_inherited_control_lock_allows_missing_binary_recovery() {
+  setup_fixture || return 1
+  exec 8>> "$MODULE_DIR/run/control.lock" || return 1
+  "$HOST_FLOCK" -n 8 || return 1
+  DNSCRYPT_CONTROL_LOCK_HELD=1
+  export DNSCRYPT_CONTROL_LOCK_HELD
+
+  INHERITED_OUTPUT=$(run_update install 2>&1)
+  INHERITED_STATUS=$?
+
+  unset DNSCRYPT_CONTROL_LOCK_HELD
+  exec 8>&-
+  assert_eq 0 "$INHERITED_STATUS" "valid inherited control lock should permit install recovery: $INHERITED_OUTPUT" || return 1
+  assert_contains "$INHERITED_OUTPUT" 'Installed dnscrypt-proxy' 'inherited-lock recovery did not install the binary' || return 1
+  assert_file_contains "$MODULE_DIR/bin/dnscrypt-proxy" '# mock dnscrypt binary' 'inherited-lock recovery installed no binary' || return 1
+}
+
+test_shutdown_marker_aborts_before_commit() {
+  setup_fixture || return 1
+  make_old_install
+  mkdir -p "$MODULE_DIR/state"
+  printf '%s\n' 'shutdown' > "$MODULE_DIR/state/shutdown-requested"
+
+  SHUTDOWN_OUTPUT=$(run_update force 2>&1)
+  SHUTDOWN_STATUS=$?
+
+  assert_eq 1 "$SHUTDOWN_STATUS" 'shutdown marker must reject a validated update' || return 1
+  assert_contains "$SHUTDOWN_OUTPUT" 'Module shutdown is pending' 'shutdown rejection reason missing' || return 1
+  assert_eq 'old dnscrypt binary' "$(cat "$MODULE_DIR/bin/dnscrypt-proxy")" 'shutdown marker allowed binary replacement' || return 1
+  assert_eq '1.0.0' "$(cat "$MODULE_DIR/run/installed-version")" 'shutdown marker advanced the version marker' || return 1
+}
+
+test_running_update_restarts_under_inherited_control_lock() {
+  setup_fixture || return 1
+  make_fake_running_install
+
+  RUNNING_OUTPUT=$(run_update force 2>&1)
+  RUNNING_STATUS=$?
+
+  assert_eq 0 "$RUNNING_STATUS" 'running service update should commit and restart' || return 1
+  assert_contains "$RUNNING_OUTPUT" 'Installed dnscrypt-proxy' 'running update success message missing' || return 1
+  assert_file_contains "$MOCK_CALL_LOG" 'control restart held=1' 'restart did not inherit the control lock' || return 1
+  assert_file_contains "$MOCK_CALL_LOG" "fd8=$MODULE_DIR/run/control.lock" 'restart inherited the wrong lock inode' || return 1
+  assert_eq "$MOCK_LATEST_VERSION" "$(cat "$MODULE_DIR/run/installed-version")" 'running update did not advance the marker' || return 1
+}
+
+test_restart_failure_restores_binary_marker_and_service() {
+  setup_fixture || return 1
+  make_fake_running_install
+  MOCK_CONTROL_MODE=restart-fail-recover
+  export MOCK_CONTROL_MODE
+
+  ROLLBACK_OUTPUT=$(run_update force 2>&1)
+  ROLLBACK_STATUS=$?
+
+  assert_eq 1 "$ROLLBACK_STATUS" 'failed new-version restart should report update failure' || return 1
+  assert_contains "$ROLLBACK_OUTPUT" 'previous binary was restored and restarted' 'successful rollback recovery was not reported' || return 1
+  assert_eq 'old dnscrypt binary' "$(cat "$MODULE_DIR/bin/dnscrypt-proxy")" 'restart failure did not restore the old binary' || return 1
+  assert_eq '1.0.0' "$(cat "$MODULE_DIR/run/installed-version")" 'restart failure did not restore the old marker' || return 1
+  assert_file_contains "$MOCK_CALL_LOG" 'control restart held=1' 'failed restart did not run under inherited lock' || return 1
+  assert_file_contains "$MOCK_CALL_LOG" 'control start held=1' 'rollback recovery did not restart under inherited lock' || return 1
+  assert_not_exists "$MODULE_DIR/run/last-update-check" 'restart failure created a cooldown' || return 1
 }
 
 test_checksum_mismatch_aborts() {
@@ -700,7 +884,7 @@ test_checksum_mismatch_aborts() {
   assert_file_contains "$MODULE_DIR/run/update-status.env" 'state=error' 'mismatch status was not recorded as error' || return 1
 }
 
-test_missing_checksum_entry_is_documented_fail_open() {
+test_missing_checksum_entry_fails_closed() {
   setup_fixture || return 1
   MOCK_CHECKSUM_MODE=missing-entry
   export MOCK_CHECKSUM_MODE
@@ -708,22 +892,53 @@ test_missing_checksum_entry_is_documented_fail_open() {
   MISSING_OUTPUT=$(run_update force 2>&1)
   MISSING_STATUS=$?
 
-  assert_eq 0 "$MISSING_STATUS" 'missing checksum entry should preserve current fail-open behavior' || return 1
-  assert_contains "$MISSING_OUTPUT" 'Installed dnscrypt-proxy' 'missing checksum entry did not continue' || return 1
-  assert_file_contains "$MODULE_DIR/logs/update.log" 'continuing without checksum comparison' 'fail-open checksum log is unclear' || return 1
+  assert_eq 1 "$MISSING_STATUS" 'missing asset digest must fail closed' || return 1
+  assert_contains "$MISSING_OUTPUT" 'did not provide a SHA256 digest' 'missing digest reason is unclear' || return 1
+  assert_not_exists "$MODULE_DIR/bin/dnscrypt-proxy" 'missing digest installed an executable' || return 1
+  assert_not_exists "$MODULE_DIR/run/last-update-check" 'missing digest created a cooldown' || return 1
 }
 
-test_checksum_download_failure_is_documented_fail_open() {
+test_missing_digest_fails_closed() {
   setup_fixture || return 1
-  MOCK_CHECKSUM_MODE=fail
+  MOCK_CHECKSUM_MODE=missing-digest
   export MOCK_CHECKSUM_MODE
 
   FAILURE_OUTPUT=$(run_update force 2>&1)
   FAILURE_STATUS=$?
 
-  assert_eq 0 "$FAILURE_STATUS" 'checksum download failure should preserve current fail-open behavior' || return 1
-  assert_contains "$FAILURE_OUTPUT" 'Installed dnscrypt-proxy' 'checksum download failure did not continue' || return 1
-  assert_file_contains "$MODULE_DIR/logs/update.log" 'continuing without checksum comparison' 'checksum download fail-open log is unclear' || return 1
+  assert_eq 1 "$FAILURE_STATUS" 'null/missing digest must fail closed' || return 1
+  assert_contains "$FAILURE_OUTPUT" 'did not provide a SHA256 digest' 'null digest reason is unclear' || return 1
+  assert_not_exists "$MODULE_DIR/bin/dnscrypt-proxy" 'null digest installed an executable' || return 1
+  assert_not_exists "$MODULE_DIR/run/last-update-check" 'null digest created a cooldown' || return 1
+}
+
+test_binary_version_mismatch_aborts() {
+  setup_fixture || return 1
+  MOCK_BINARY_VERSION=8.8.8
+  export MOCK_BINARY_VERSION
+
+  VERSION_OUTPUT=$(run_update force 2>&1)
+  VERSION_STATUS=$?
+
+  assert_eq 1 "$VERSION_STATUS" 'binary version mismatch must abort' || return 1
+  assert_contains "$VERSION_OUTPUT" "does not match release $MOCK_LATEST_VERSION" 'version mismatch reason missing' || return 1
+  assert_not_exists "$MODULE_DIR/bin/dnscrypt-proxy" 'wrong-version binary was installed' || return 1
+  assert_not_exists "$MODULE_DIR/run/last-update-check" 'version mismatch created a cooldown' || return 1
+}
+
+test_binary_config_check_failure_aborts() {
+  setup_fixture || return 1
+  printf '%s\n' "listen_addresses = ['127.0.0.1:5354']" > "$MODULE_DIR/config/dnscrypt-proxy.toml"
+  MOCK_BINARY_MODE=config-fail
+  export MOCK_BINARY_MODE
+
+  CONFIG_OUTPUT=$(run_update force 2>&1)
+  CONFIG_STATUS=$?
+
+  assert_eq 1 "$CONFIG_STATUS" 'new binary config failure must abort' || return 1
+  assert_contains "$CONFIG_OUTPUT" 'rejected the active configuration' 'config-check failure reason missing' || return 1
+  assert_not_exists "$MODULE_DIR/bin/dnscrypt-proxy" 'config-incompatible binary was installed' || return 1
+  assert_not_exists "$MODULE_DIR/run/last-update-check" 'config-check failure created a cooldown' || return 1
 }
 
 test_zip_without_binary_aborts() {
@@ -761,7 +976,7 @@ test_atomic_install_keeps_backup_and_cleans_temporary_files() {
 
   assert_eq 0 "$INSTALL_STATUS" 'valid update should install successfully' || return 1
   assert_contains "$INSTALL_OUTPUT" 'Installed dnscrypt-proxy' 'install success message missing' || return 1
-  assert_eq "$MOCK_NEW_BINARY" "$(cat "$MODULE_DIR/bin/dnscrypt-proxy")" 'installed binary content is wrong' || return 1
+  assert_file_contains "$MODULE_DIR/bin/dnscrypt-proxy" '# mock dnscrypt binary' 'installed binary content is wrong' || return 1
   assert_eq 'old dnscrypt binary' "$(cat "$MODULE_DIR/bin/dnscrypt-proxy.bak")" 'previous binary backup is wrong' || return 1
   assert_not_exists "$MODULE_DIR/bin/dnscrypt-proxy.tmp" 'temporary binary was not atomically moved' || return 1
   assert_eq "$MOCK_LATEST_VERSION" "$(cat "$MODULE_DIR/run/installed-version")" 'installed version was not updated' || return 1
@@ -804,11 +1019,15 @@ run_case() {
 echo "Running updater tests with $TEST_SHELL_KIND"
 
 run_case 'all ABI mappings' test_all_abi_mappings
+run_case 'compact asset digests stay associated with their asset' test_asset_digest_parser_handles_compact_json
+run_case 'unknown mode aborts before network' test_unknown_mode_aborts_before_network
 run_case 'unknown ABI aborts before network' test_unknown_abi_aborts_before_network
 run_case 'curl/wget/BusyBox download fallbacks' test_download_fallbacks
 run_case 'sha256sum/BusyBox hash fallbacks' test_sha256_fallbacks
 run_case 'metadata network failure is retryable' test_metadata_network_failure_is_immediately_retryable
 run_case 'malformed metadata is retryable' test_malformed_metadata_is_immediately_retryable
+run_case 'malformed cooldown marker is ignored' test_malformed_cooldown_marker_is_ignored
+run_case 'overflow and future cooldown markers are ignored' test_overflow_and_future_cooldown_markers_are_ignored
 run_case 'successful metadata starts cooldown' test_successful_metadata_starts_cooldown
 run_case 'active lock is preserved' test_active_lock_is_preserved
 run_case 'active legacy lock is preserved' test_active_legacy_lock_is_preserved
@@ -825,9 +1044,17 @@ run_case 'missing flock fails closed' test_missing_flock_fails_closed
 run_case 'TERM stops update and cleans lock' test_term_signal_stops_update_and_cleans_lock
 run_case 'owned lock is cleaned on failure' test_owned_lock_is_cleaned_on_failure
 run_case 'matching checksum installs' test_checksum_match_installs
+run_case 'compact release metadata installs' test_compact_release_metadata_installs
+run_case 'control lock contention aborts before commit' test_control_lock_contention_aborts_before_commit
+run_case 'valid inherited control lock permits missing-binary recovery' test_inherited_control_lock_allows_missing_binary_recovery
+run_case 'shutdown marker aborts before commit' test_shutdown_marker_aborts_before_commit
+run_case 'running update restarts under inherited lock' test_running_update_restarts_under_inherited_control_lock
+run_case 'restart failure rolls back binary, marker, and service' test_restart_failure_restores_binary_marker_and_service
 run_case 'checksum mismatch aborts' test_checksum_mismatch_aborts
-run_case 'missing checksum entry fails open explicitly' test_missing_checksum_entry_is_documented_fail_open
-run_case 'checksum download failure fails open explicitly' test_checksum_download_failure_is_documented_fail_open
+run_case 'missing asset digest fails closed' test_missing_checksum_entry_fails_closed
+run_case 'null asset digest fails closed' test_missing_digest_fails_closed
+run_case 'binary version mismatch aborts before install' test_binary_version_mismatch_aborts
+run_case 'binary config check aborts before install' test_binary_config_check_failure_aborts
 run_case 'ZIP without binary aborts' test_zip_without_binary_aborts
 run_case 'empty binary aborts' test_empty_binary_aborts
 run_case 'successful install is atomic' test_atomic_install_keeps_backup_and_cleans_temporary_files

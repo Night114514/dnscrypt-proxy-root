@@ -1,9 +1,14 @@
 /.gitattributes text eol=lf
 *.md text eol=crlf
+/CHANGELOG.md text eol=lf
 *.sh text eol=lf
+*.toml text eol=lf
+*.html text eol=lf
+*.js text eol=lf
 module.prop text eol=lf
 update.json text eol=lf
 .github/upstream-version text eol=lf
 tests/mocks/* text eol=lf
 META-INF/com/google/android/update-binary text eol=lf
+META-INF/com/google/android/updater-script text eol=lf
 .github/workflows/*.yml text eol=lf

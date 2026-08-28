@@ -1,0 +1,20 @@
+#!/bin/sh
+set -u
+
+action=${1:-}
+lock_target=$(readlink "/proc/$$/fd/8" 2>/dev/null || true)
+
+printf 'control %s held=%s fd8=%s\n' \
+  "$action" "${DNSCRYPT_CONTROL_LOCK_HELD:-0}" "$lock_target" >> "$MOCK_CALL_LOG"
+
+[ "${DNSCRYPT_CONTROL_LOCK_HELD:-0}" = "1" ] || exit 70
+[ "$lock_target" = "$MOCK_CONTROL_LOCK_FILE" ] || exit 71
+
+case "$action:${MOCK_CONTROL_MODE:-success}" in
+  restart:restart-fail-recover) exit 1 ;;
+  start:restart-fail-recover) exit 0 ;;
+  restart:restart-fail-recovery-fail) exit 1 ;;
+  start:restart-fail-recovery-fail) exit 1 ;;
+  restart:success|start:success) exit 0 ;;
+  *) exit 64 ;;
+esac

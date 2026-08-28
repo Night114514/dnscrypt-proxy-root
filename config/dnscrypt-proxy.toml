@@ -1,4 +1,5 @@
 listen_addresses = ['127.0.0.1:5354']
+user_name = '3003'
 server_names = ['cloudflare', 'quad9-dnscrypt-ip4-filter-pri']
 max_clients = 250
 ipv4_servers = true
@@ -13,7 +14,6 @@ force_tcp = false
 timeout = 5000
 keepalive = 30
 cert_refresh_delay = 240
-fallback_resolvers = ['9.9.9.9:53', '1.1.1.1:53']
 bootstrap_resolvers = ['9.9.9.9:53', '149.112.112.112:53', '1.1.1.1:53']
 ignore_system_dns = true
 netprobe_timeout = 60

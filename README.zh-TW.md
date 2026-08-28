@@ -70,7 +70,7 @@ WebUI 支援 **English**、**繁體中文** 與 **简体中文**，並依系統�
 - dnscrypt-proxy 監聽於 `127.0.0.1:5354`。
 - 在 `OUTPUT` 鏈中的 iptables NAT 鏈（`DNSCRYPT_PROXY`）會將所有對外的明文 DNS 查詢（UDP/TCP port 53）DNAT 到 `127.0.0.1:5354`。
 - 啟用 `net.ipv4.conf.all.route_localnet=1`，讓核心不會丟棄從 `OUTPUT` 鏈 DNAT 到 loopback 位址的封包（沒有這一項，重導向會完全失效）。
-- 上游解析器 IP（Cloudflare `1.1.1.1`/`1.0.0.1`、Quad9 `9.9.9.9`/`149.112.112.112`）與 `127.0.0.0/8` loopback 範圍會以 `RETURN` 規則排除，避免 bootstrap 與 netprobe 流量被重導回代理而形成解析迴圈。排除是**依目的地 IP** 而非 UID —— 在 Android 上使用 `--uid-owner 0` 是錯誤的，因為 `netd`（系統 DNS 代理）同樣以 root 執行，會導致所有 App 的 DNS 繞過代理。
+- dnscrypt-proxy 會降權為 Android 保留的 AID_INET 身分（`3003`）。只有此專用 UID 與 `127.0.0.0/8` loopback 範圍使用 `RETURN` 規則，避免 bootstrap／netprobe 流量遞迴回代理。模組不再全域放行任何上游目的地，因此一般 App 無法直接查詢 bootstrap IP 來繞過保護。
 - 由於 dnscrypt-proxy 僅監聽 IPv4，IPv6 明文 DNS（port 53）會以 `ip6tables` `REJECT` 規則阻擋，避免未加密的 IPv6 DNS 洩漏。
 
 ### skip_mount
@@ -88,9 +88,9 @@ WebUI 支援 **English**、**繁體中文** 與 **简体中文**，並依系統�
 5. 更新模組中繼資料
 
 檢查頻率限制為每 24 小時一次（可透過 `DNSCRYPT_UPDATE_INTERVAL_SECONDS` 設定）。
-只有成功下載 release metadata 並解析出非空 release tag 後，才會記錄限流時間；網路失敗或 metadata 格式錯誤可在下次呼叫時立即重試。
+只有檢查成功、已是最新版，或新版完整安裝並通過重啟驗證後，才會記錄限流時間；網路、metadata、下載、驗證、重啟或回滾失敗皆可立即重試。
 
-更新器也會嘗試使用同一 release 下載的 `minisign.txt` 進行 best-effort SHA256 比對。程式**不會**以 Minisign 或釘選公鑰驗證該檢查碼清單。實際雜湊不符會中止更新；但清單下載失敗、找不到資產項目或無法計算雜湊時，仍會繼續安裝。此比對只能在檢查碼可用時偵測意外毀損，不能驗證發布者身分。
+解壓前，更新器會從 GitHub Release API 取得該精確 asset 的伺服器端 SHA-256，並強制與下載檔比對。雜湊缺失、格式錯誤、無法計算或不相符都會中止安裝。這是 GitHub HTTPS/API 信任邊界內的 fail-closed 完整性檢查，並非獨立的 Minisign 發布者身分驗證。
 
 ### CI/CD 自動更新（GitHub Actions）
 
@@ -149,7 +149,8 @@ dnscrypt-proxy-root/
 ├── scripts/
 │   ├── common.sh                # 共用工具函式
 │   ├── dnscrypt-control.sh      # 服務控制與 WebUI API
-│   └── update-dnscrypt.sh       # 二進位更新器
+│   ├── update-dnscrypt.sh       # 二進位更新器
+│   └── watchdog.sh              # 單一實例健康檢查與自動恢復
 ├── tests/                        # POSIX sh 更新器回歸測試與 mock
 ├── webroot/                     # WebUI 靜態檔案
 │   ├── index.html
@@ -212,6 +213,16 @@ dnscrypt-proxy-root/
 ---
 
 ## 變更紀錄
+
+### v0.9.0 (2026-08-28)
+
+- 修復 v0.8 稽核確認的備份清理、訂閱累積、IPv6 規則、測速、watchdog、base64、空清單還原、下載 fallback、資源／日誌路徑與 resolver 空白問題。
+- 強化精確 PID、DNS／防火牆 readiness、Android Private DNS 還原、模組升級設定遷移、停用／移除清理與 AID_INET 專用執行身分。
+- 上游壓縮檔驗證改為強制 fail-closed，並加入二進位／設定驗證、交易式重啟與明確回滾狀態。
+- WebUI 現在會顯示 shell 失敗，清單採原子寫入；查詢統計依官方 TSV return code 計算，不再把錯誤當成功或顯示假資料。
+- 依目前 KernelSU／APatch 實作重新驗證中繼資料、ZIP 結構、生命週期、權限、WebUI bridge 與 Markdown 更新描述檔，並擴充 dash／BusyBox ash／JavaScript CI。
+
+完整內容請參閱 [CHANGELOG.md](CHANGELOG.md)。
 
 ### v0.8.0 (2026-08-18)
 

@@ -1,0 +1,42 @@
+#!/bin/sh
+set -u
+
+subcommand=${1:-}
+[ -n "$subcommand" ] || exit 127
+shift
+
+printf 'busybox %s %s\n' "$subcommand" "$*" >> "$MOCK_CALL_LOG"
+
+case "$subcommand" in
+  base64)
+    exec "$MOCK_HOST_BASE64" "$@"
+    ;;
+  wget)
+    output=
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -O)
+          shift
+          output=${1:-}
+          ;;
+      esac
+      shift
+    done
+    [ -n "$output" ] || exit 64
+    [ "${MOCK_DOWNLOAD_MODE:-success}" = "success" ] || exit 1
+    "$MOCK_HOST_CP" "$MOCK_SUBSCRIPTION_PAYLOAD" "$output"
+    ;;
+  flock)
+    count=0
+    [ ! -f "${MOCK_FLOCK_STATE:-}" ] || count=$(cat "$MOCK_FLOCK_STATE")
+    if [ "$count" -lt "${MOCK_FLOCK_FAILURES:-0}" ]; then
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$MOCK_FLOCK_STATE"
+      exit 1
+    fi
+    exit 0
+    ;;
+  *)
+    exit 127
+    ;;
+esac

@@ -24,58 +24,47 @@ jobs:
           sudo apt-get install --no-install-recommends --yes busybox-static shellcheck util-linux
 
       - name: Check shell syntax
-        shell: dash -e {0}
+        shell: bash
         run: |
-          for file in \
-            action.sh \
-            customize.sh \
-            post-fs-data.sh \
-            service.sh \
-            uninstall.sh \
-            scripts/common.sh \
-            scripts/dnscrypt-control.sh \
-            scripts/update-dnscrypt.sh \
-            tests/test-update-dnscrypt.sh \
-            tests/mocks/busybox-ash-prelude
-          do
-            dash -n "$file" || exit 1
+          mapfile -t shell_files < <({ git grep -Il '^#!.*sh'; printf '%s\n' customize.sh; } | sort -u)
+          test "${#shell_files[@]}" -gt 0
+          printf 'Checking %d Shell files with dash\n' "${#shell_files[@]}"
+          for file in "${shell_files[@]}"; do
+            dash -n "$file"
           done
 
       - name: Check BusyBox ash syntax
+        shell: bash
         run: |
-          for file in \
-            action.sh \
-            customize.sh \
-            post-fs-data.sh \
-            service.sh \
-            uninstall.sh \
-            scripts/common.sh \
-            scripts/dnscrypt-control.sh \
-            scripts/update-dnscrypt.sh \
-            tests/test-update-dnscrypt.sh \
-            tests/mocks/busybox \
-            tests/mocks/busybox-ash-prelude \
-            tests/mocks/date \
-            tests/mocks/download \
-            tests/mocks/getprop \
-            tests/mocks/mv \
-            tests/mocks/notify \
-            tests/mocks/sha256sum \
-            tests/mocks/uname \
-            tests/mocks/unzip
-          do
-            busybox ash -n "$file" || exit 1
+          mapfile -t shell_files < <({ git grep -Il '^#!.*sh'; printf '%s\n' customize.sh; } | sort -u)
+          test "${#shell_files[@]}" -gt 0
+          printf 'Checking %d Shell files with BusyBox ash\n' "${#shell_files[@]}"
+          for file in "${shell_files[@]}"; do
+            busybox ash -n "$file"
           done
 
-      - name: Run ShellCheck
+      - name: Run ShellCheck on every Shell file
+        shell: bash
         run: |
-          shellcheck -s sh \
+          mapfile -t shell_files < <({ git grep -Il '^#!.*sh'; printf '%s\n' customize.sh; } | sort -u)
+          test "${#shell_files[@]}" -gt 0
+          shellcheck --severity=error --shell=sh "${shell_files[@]}"
+
+          # Keep warning/info lint strict on the portable core and test harness.
+          # SC2016 is intentional where tests assert literal shell source, and
+          # SC2329 is intentional for functions invoked indirectly by traps.
+          shellcheck --exclude=SC2016,SC2329 --shell=sh \
             scripts/common.sh \
             scripts/update-dnscrypt.sh \
+            tests/test-dnscrypt-control.sh \
             tests/test-update-dnscrypt.sh \
             tests/mocks/busybox \
             tests/mocks/busybox-ash-prelude \
             tests/mocks/date \
+            tests/mocks/dnscrypt-control-busybox \
+            tests/mocks/dnscrypt-control-firewall \
+            tests/mocks/dnscrypt-control-nslookup \
+            tests/mocks/dnscrypt-control-updater \
             tests/mocks/download \
             tests/mocks/getprop \
             tests/mocks/mv \
@@ -83,9 +72,28 @@ jobs:
             tests/mocks/sha256sum \
             tests/mocks/uname \
             tests/mocks/unzip
+
+      - name: Check every JavaScript file
+        shell: bash
+        run: |
+          mapfile -d '' js_files < <(git ls-files -z -- '*.js')
+          test "${#js_files[@]}" -gt 0
+          printf 'Checking %d JavaScript files with Node.js\n' "${#js_files[@]}"
+          for file in "${js_files[@]}"; do
+            node --check "$file"
+          done
+
+      - name: Run WebUI bridge tests
+        run: node tests/test-webui-bridge.js
 
       - name: Run updater tests with dash
         run: env DNSCRYPT_UPDATE_INTERVAL_SECONDS=0 TEST_SHELL_KIND=dash dash tests/test-update-dnscrypt.sh
 
+      - name: Run dnscrypt-control tests with dash
+        run: env TEST_SHELL_KIND=dash dash tests/test-dnscrypt-control.sh
+
       - name: Run updater tests with BusyBox ash
         run: env DNSCRYPT_UPDATE_INTERVAL_SECONDS=0 TEST_SHELL_KIND=busybox-ash busybox ash tests/test-update-dnscrypt.sh
+
+      - name: Run dnscrypt-control tests with BusyBox ash
+        run: env TEST_SHELL_KIND=busybox-ash busybox ash tests/test-dnscrypt-control.sh

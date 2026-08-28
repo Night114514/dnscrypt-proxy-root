@@ -22,30 +22,45 @@
       }
       var settled = false;
       var cbName = "dnscryptLeakCb_" + Date.now() + "_" + Math.floor(Math.random() * 1e6);
-      window[cbName] = function (errno, stdout, stderr) {
+      var timer = null;
+      function cleanup() {
+        if (timer !== null) clearTimeout(timer);
+        try { delete window[cbName]; } catch (e) { window[cbName] = undefined; }
+      }
+      function finish(result) {
         if (settled) return;
         settled = true;
-        try { delete window[cbName]; } catch (e) { window[cbName] = undefined; }
-        resolve({ errno: errno, stdout: stdout || "", stderr: stderr || "" });
+        cleanup();
+        resolve(result);
+      }
+      window[cbName] = function (errno, stdout, stderr) {
+        var code = Number(errno);
+        finish({ errno: isFinite(code) ? code : 1, stdout: stdout || "", stderr: stderr || "" });
       };
+      timer = setTimeout(function () {
+        finish({ errno: 124, stdout: "", stderr: "command timed out" });
+      }, 30000);
       try {
         var ret = window.ksu.exec(cmd, "{}", cbName);
         if (typeof ret === "string") {
-          if (!settled) {
-            settled = true;
-            try { delete window[cbName]; } catch (e) { window[cbName] = undefined; }
-            resolve({ errno: 0, stdout: ret, stderr: "" });
-          }
+          finish({ errno: 0, stdout: ret, stderr: "" });
         }
       } catch (err) {
         if (settled) return;
         try {
-          var out = window.ksu.exec(cmd);
-          settled = true;
-          resolve({ errno: 0, stdout: typeof out === "string" ? out : "", stderr: "" });
+          var token = "__DPR_LEAK_EXIT_91f24c__";
+          var wrapped = "{ __dpr_err=$( ( " + cmd + " ) 2>&1 1>&3); " +
+            "__dpr_rc=$?; if [ \"$__dpr_rc\" -ne 0 ] && [ -n \"$__dpr_err\" ]; " +
+            "then printf '\\n%s' \"$__dpr_err\"; fi; printf '" + token + "%s' \"$__dpr_rc\"; } 3>&1";
+          var out = window.ksu.exec(wrapped);
+          if (typeof out !== "string") throw new Error("legacy exec returned no output");
+          var marker = out.lastIndexOf(token);
+          if (marker < 0) throw new Error("legacy exec returned no status");
+          var statusText = out.slice(marker + token.length).trim();
+          if (!/^[0-9]+$/.test(statusText)) throw new Error("legacy exec returned invalid status");
+          finish({ errno: Number(statusText), stdout: out.slice(0, marker), stderr: "" });
         } catch (e2) {
-          settled = true;
-          resolve({ errno: 1, stdout: "", stderr: String(e2) });
+          finish({ errno: 1, stdout: "", stderr: String(e2) });
         }
       }
     });
@@ -82,6 +97,9 @@
       result.textContent = "正在檢測 DNS 洩漏，請稍候...";
 
       execCmd("sh " + CONTROL + " leak-test").then(function (res) {
+        if (Number(res.errno) !== 0) {
+          throw new Error(res.stderr || res.stdout || "leak test command failed");
+        }
         var data = null;
         try { data = JSON.parse((res.stdout || "").trim()); } catch (e) { data = null; }
 

@@ -18,12 +18,19 @@ printf 'unzip\n' >> "$MOCK_CALL_LOG"
 
 case "$MOCK_UNZIP_MODE" in
   success)
-    mkdir -p "$destination/android-test"
-    printf '%s\n' "$MOCK_NEW_BINARY" > "$destination/android-test/dnscrypt-proxy"
+    mkdir -p "$destination/$MOCK_INNER_DIR"
+    printf '%s\n' \
+      '#!/bin/sh' \
+      '# mock dnscrypt binary' \
+      'case "${1:-}" in' \
+      '  -version) printf "%s\\n" "${MOCK_BINARY_VERSION:-$MOCK_LATEST_VERSION}" ;;' \
+      '  -check) [ "${MOCK_BINARY_MODE:-success}" != "config-fail" ] ;;' \
+      '  *) exit 64 ;;' \
+      'esac' > "$destination/$MOCK_INNER_DIR/dnscrypt-proxy"
     ;;
   empty)
-    mkdir -p "$destination/android-test"
-    : > "$destination/android-test/dnscrypt-proxy"
+    mkdir -p "$destination/$MOCK_INNER_DIR"
+    : > "$destination/$MOCK_INNER_DIR/dnscrypt-proxy"
     ;;
   missing)
     :

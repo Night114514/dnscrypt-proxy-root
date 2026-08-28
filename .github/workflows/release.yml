@@ -7,6 +7,7 @@ on:
     paths:
       - module.prop
       - update.json
+  workflow_dispatch:
 permissions:
   contents: write
 
@@ -44,7 +45,9 @@ jobs:
           JSON_VERSION=$(jq -er '.version | select(type == "string")' update.json)
           JSON_CODE=$(jq -er '.versionCode | select(type == "number")' update.json)
           JSON_ZIP_URL=$(jq -er '.zipUrl | select(type == "string")' update.json)
+          JSON_CHANGELOG=$(jq -er '.changelog | select(type == "string")' update.json)
           EXPECTED_ZIP_URL="https://github.com/${{ github.repository }}/releases/download/$TAG/dnscrypt-proxy-root-$TAG.zip"
+          EXPECTED_CHANGELOG="https://raw.githubusercontent.com/${{ github.repository }}/$TAG/CHANGELOG.md"
 
           [ "$TAG" = "$MODULE_VERSION" ] || {
             echo "Tag ($TAG) does not match module.prop ($MODULE_VERSION)." >&2
@@ -60,6 +63,14 @@ jobs:
           }
           [ "$JSON_ZIP_URL" = "$EXPECTED_ZIP_URL" ] || {
             echo "Unexpected update ZIP URL: $JSON_ZIP_URL" >&2
+            exit 1
+          }
+          [ "$JSON_CHANGELOG" = "$EXPECTED_CHANGELOG" ] || {
+            echo "Unexpected changelog URL: $JSON_CHANGELOG" >&2
+            exit 1
+          }
+          [ -s CHANGELOG.md ] && grep -F "## $TAG " CHANGELOG.md >/dev/null || {
+            echo "CHANGELOG.md has no entry for $TAG." >&2
             exit 1
           }
 
@@ -141,10 +152,11 @@ jobs:
 
             The matching dnscrypt-proxy binary is downloaded during installation or on the next update check; it is not bundled in the module ZIP.
 
-            Existing installations whose update descriptor is pinned to `v0.7.0` must install `v0.8.0` manually once. Releases from `v0.8.0` onward use a stable update descriptor URL.
+            See the [full module changelog](https://raw.githubusercontent.com/${{ github.repository }}/${{ steps.version.outputs.tag }}/CHANGELOG.md).
           files: |
             ${{ steps.version.outputs.zip_name }}
             update.json
+            CHANGELOG.md
           fail_on_unmatched_files: true
           make_latest: true
           draft: false

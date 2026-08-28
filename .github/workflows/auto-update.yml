@@ -24,7 +24,11 @@ permissions:
   contents: write
 
 jobs:
+  verify:
+    uses: ./.github/workflows/test.yml
+
   check-and-release:
+    needs: verify
     # A dispatch from a feature branch must never advance master or publish it.
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
@@ -186,11 +190,21 @@ jobs:
           sed -i "s#^description=.*#description=Systemless dnscrypt-proxy for Magisk/KernelSU/APatch with automatic upstream binary updates and KernelSU/APatch WebUI. Installed dnscrypt-proxy: $UPSTREAM_VERSION.#" module.prop
           printf '%s\n' "$UPSTREAM_VERSION" > .github/upstream-version
 
+          CHANGELOG_TMP=$(mktemp)
+          {
+            sed -n '1p' CHANGELOG.md
+            printf '\n## %s (%s)\n\n' "$MODULE_VERSION" "$(date -u +%Y-%m-%d)"
+            printf -- '- Updated the approved upstream dnscrypt-proxy release to `%s`.\n' "$UPSTREAM_VERSION"
+            printf -- '- Rebuilt and revalidated the KernelSU/APatch module archive and update metadata.\n'
+            sed -n '2,$p' CHANGELOG.md
+          } > "$CHANGELOG_TMP"
+          mv "$CHANGELOG_TMP" CHANGELOG.md
+
           jq -n \
             --arg version "$MODULE_VERSION" \
             --argjson versionCode "$VERSION_CODE" \
             --arg zipUrl "https://github.com/${{ github.repository }}/releases/download/$MODULE_VERSION/dnscrypt-proxy-root-$MODULE_VERSION.zip" \
-            --arg changelog "https://github.com/${{ github.repository }}/releases/tag/$MODULE_VERSION" \
+            --arg changelog "https://raw.githubusercontent.com/${{ github.repository }}/$MODULE_VERSION/CHANGELOG.md" \
             '{version: $version, versionCode: $versionCode, zipUrl: $zipUrl, changelog: $changelog}' \
             > update.json
 
@@ -247,7 +261,7 @@ jobs:
               git push origin "refs/tags/$MODULE_VERSION"
             fi
           else
-            git add .github/upstream-version module.prop update.json
+            git add .github/upstream-version CHANGELOG.md module.prop update.json
             if git diff --cached --quiet; then
               echo 'Release metadata did not change.' >&2
               exit 1
@@ -284,6 +298,7 @@ jobs:
           files: |
             ${{ steps.module.outputs.zip_name }}
             update.json
+            CHANGELOG.md
           fail_on_unmatched_files: true
           make_latest: true
           draft: false

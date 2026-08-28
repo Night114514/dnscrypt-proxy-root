@@ -1,0 +1,32 @@
+#!/bin/sh
+set -u
+
+tool=${0##*/}
+arguments=$*
+printf '%s %s\n' "$tool" "$arguments" >> "$MOCK_CALL_LOG"
+
+key=
+case "$tool $arguments" in
+  "iptables "*" -D OUTPUT -p udp --dport 53 -j DNSCRYPT_PROXY") key=iptables-output-udp ;;
+  "iptables "*" -D OUTPUT -p tcp --dport 53 -j DNSCRYPT_PROXY") key=iptables-output-tcp ;;
+  "ip6tables "*" -D OUTPUT -p udp --dport 53 -j REJECT") key=ip6tables-direct-output-udp ;;
+  "ip6tables "*" -D OUTPUT -p tcp --dport 53 -j REJECT") key=ip6tables-direct-output-tcp ;;
+  "ip6tables "*" -D INPUT -p udp --dport 53 -j REJECT") key=ip6tables-direct-input-udp ;;
+  "ip6tables "*" -D OUTPUT -j DNSCRYPT_PROXY6") key=ip6tables-output-chain ;;
+esac
+
+# Every exact delete rule appears to exist twice, then reports "not found".
+# This proves the production loops delete all duplicates and terminate.
+if [ -n "$key" ]; then
+  state_file="$MOCK_FIREWALL_STATE/$key"
+  count=0
+  [ ! -f "$state_file" ] || count=$(cat "$state_file")
+  if [ "$count" -lt 2 ]; then
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$state_file"
+    exit 0
+  fi
+  exit 1
+fi
+
+exit 0

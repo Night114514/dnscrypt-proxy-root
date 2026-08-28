@@ -76,12 +76,10 @@ saved in the browser's `localStorage`; the default is dark (AMOLED-friendly).
 - `net.ipv4.conf.all.route_localnet=1` is enabled so the kernel does not drop packets
   DNAT'd to the loopback address from the `OUTPUT` chain (without this the redirection
   fails completely).
-- Upstream resolver IPs (Cloudflare `1.1.1.1`/`1.0.0.1`, Quad9 `9.9.9.9`/`149.112.112.112`)
-  and the `127.0.0.0/8` loopback range are excluded with `RETURN` rules so bootstrap and
-  netprobe traffic is not redirected back into the proxy, avoiding a resolution loop.
-  Exclusion is done **by destination IP**, not by UID — using `--uid-owner 0` is wrong on
-  Android because `netd` (the system DNS proxy) also runs as root, which would let app DNS
-  bypass the proxy entirely.
+- dnscrypt-proxy drops privileges to Android's reserved AID_INET identity (`3003`). Only this
+  dedicated UID and the `127.0.0.0/8` loopback range receive `RETURN` rules, so bootstrap and
+  netprobe traffic cannot recurse into the proxy. No resolver destination is globally allowlisted;
+  ordinary apps therefore cannot bypass protection by querying one of the bootstrap IPs directly.
 - Because dnscrypt-proxy only listens on IPv4, plaintext DNS over IPv6 (port 53) is blocked
   with `ip6tables` `REJECT` rules to prevent unencrypted IPv6 DNS leakage.
 
@@ -100,15 +98,14 @@ On each boot, `service.sh` triggers a background update check:
 5. Updates module metadata
 
 The check is rate-limited to once per 24 hours (configurable via `DNSCRYPT_UPDATE_INTERVAL_SECONDS`).
-The rate-limit timestamp is recorded only after the release metadata has been downloaded and a
-non-empty release tag has been parsed, so network and metadata-format failures can be retried on the
-next invocation.
+The rate-limit timestamp is recorded only after a successful check, an up-to-date result, or a fully
+committed installation. Network, metadata, download, validation, restart, and rollback failures remain
+immediately retryable.
 
-The updater also attempts a best-effort SHA256 comparison using `minisign.txt` downloaded from the
-same release. It does **not** authenticate that checksum list with Minisign or a pinned signing key.
-An actual hash mismatch aborts the update, but installation continues if the list cannot be
-downloaded, the asset has no entry, or no hash can be calculated. This comparison can detect
-accidental corruption when checksum data is available; it does not authenticate the publisher.
+Before extraction, the updater requires the exact asset's server-computed SHA-256 digest from the
+GitHub Release API and compares it with the downloaded archive. A missing, malformed, unavailable, or
+mismatched digest aborts the install. This is a fail-closed integrity check within GitHub's HTTPS/API
+trust boundary; it is not an independent Minisign publisher-identity verification.
 
 ### CI/CD Auto-Update (GitHub Actions)
 
@@ -142,10 +139,12 @@ WebUI prompts you to enable it. No remote services are contacted — the test is
 
 `service.sh` starts a background watchdog that checks the service every 60 seconds:
 
-- If dnscrypt-proxy stops **unexpectedly** (i.e. not via a user-initiated stop — tracked with a
-  `run/user_stopped` marker file), it posts an Android notification and **auto-restarts the service
-  once**. On successful recovery it posts a "service recovered" notification.
+- If the process, encrypted resolution, or firewall rules fail **unexpectedly** (i.e. not after a
+  user-initiated stop), it posts an Android notification and keeps retrying bounded recovery. On
+  successful recovery it posts a "service recovered" notification.
 - Notifications are capped at **3 per boot** so a crash loop cannot spam the status bar.
+- The watchdog is single-instance and tracked by PID; disable, removal, and uninstall stop it and
+  restore the saved Android Private DNS state before the module files disappear.
 - A successful upstream binary update also posts a notification. Failed updates stay silent (logged
   only) to avoid noise.
 
@@ -176,7 +175,8 @@ dnscrypt-proxy-root/
 ├── scripts/
 │   ├── common.sh                # Shared utilities
 │   ├── dnscrypt-control.sh      # Service control & WebUI API
-│   └── update-dnscrypt.sh       # Binary updater
+│   ├── update-dnscrypt.sh       # Binary updater
+│   └── watchdog.sh              # Single-instance health/recovery loop
 ├── tests/                        # POSIX sh updater regression suite and mocks
 ├── webroot/                     # WebUI static files
 │   ├── index.html
@@ -243,6 +243,21 @@ Edit via the WebUI Config tab or manually with a text editor.
 ---
 
 ## Changelog
+
+### v0.9.0 (2026-08-28)
+
+- Fixed all confirmed backup, subscription, IPv6 firewall, resolver timing, watchdog, base64,
+  import, download fallback, resource-path, log-path, and resolver-list issues from the v0.8 audit.
+- Hardened exact PID ownership, DNS/firewall readiness, Android Private DNS restoration, staged
+  upgrade migration, disable/uninstall shutdown, and the dedicated AID_INET runtime identity.
+- Made upstream archive verification mandatory and fail-closed; added executable/config validation,
+  transactional restart, and explicit rollback state handling.
+- Made WebUI command failures visible, list writes atomic, and query statistics conform to the
+  official TSV return-code fields instead of displaying false successes or demo telemetry.
+- Revalidated KernelSU/APatch metadata, ZIP layout, lifecycle scripts, permissions, WebUI bridge,
+  and Markdown update descriptor; expanded dash/BusyBox ash and JavaScript CI coverage.
+
+See [CHANGELOG.md](CHANGELOG.md) for the complete v0.9.0 change list.
 
 ### v0.8.0 (2026-08-18)
 
