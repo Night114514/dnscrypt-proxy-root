@@ -569,7 +569,9 @@ stop_watchdog() {
       sleep 1
       _watchdog_wait=$((_watchdog_wait + 1))
     done
-    is_watchdog_pid "$_watchdog_pid" && kill -9 "$_watchdog_pid" >/dev/null 2>&1 || true
+    if is_watchdog_pid "$_watchdog_pid"; then
+      kill -9 "$_watchdog_pid" >/dev/null 2>&1 || true
+    fi
     _watchdog_stop_count=$((_watchdog_stop_count + 1))
   done
   rm -f "$WATCHDOG_PID_FILE"
