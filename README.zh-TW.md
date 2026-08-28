@@ -214,7 +214,7 @@ dnscrypt-proxy-root/
 
 ## 變更紀錄
 
-### v0.9.0 (2026-08-28)
+### v0.9.0 (2026-08-29)
 
 - 修復 v0.8 稽核確認的備份清理、訂閱累積、IPv6 規則、測速、watchdog、base64、空清單還原、下載 fallback、資源／日誌路徑與 resolver 空白問題。
 - 強化精確 PID、DNS／防火牆 readiness、Android Private DNS 還原、模組升級設定遷移、停用／移除清理與 AID_INET 專用執行身分。

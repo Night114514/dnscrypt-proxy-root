@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.9.0 (2026-08-28)
+## v0.9.0 (2026-08-29)
 
 ### Reliability and Android lifecycle
 

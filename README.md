@@ -244,7 +244,7 @@ Edit via the WebUI Config tab or manually with a text editor.
 
 ## Changelog
 
-### v0.9.0 (2026-08-28)
+### v0.9.0 (2026-08-29)
 
 - Fixed all confirmed backup, subscription, IPv6 firewall, resolver timing, watchdog, base64,
   import, download fallback, resource-path, log-path, and resolver-list issues from the v0.8 audit.
