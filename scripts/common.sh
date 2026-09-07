@@ -411,11 +411,30 @@ cleanup_runtime_module_binary_backup() {
     && [ ! -L "$RUNTIME_MODULE_BINARY_BACKUP" ]
 }
 
+prepare_runtime_aux_tree_for_cleanup() {
+  _runtime_cleanup_root="$1"
+  runtime_owned_aux_path_is_safe "$_runtime_cleanup_root" || return 1
+  # Close traversal through a published/tombstoned tree before temporarily
+  # relaxing any UID-owned child directory for deterministic cleanup.
+  chmod 0700 "$_runtime_cleanup_root" 2>/dev/null || return 1
+  _runtime_cleanup_active="$_runtime_cleanup_root/active"
+  if [ -e "$_runtime_cleanup_active" ] || [ -L "$_runtime_cleanup_active" ]; then
+    [ -d "$_runtime_cleanup_active" ] && [ ! -L "$_runtime_cleanup_active" ] \
+      || return 1
+    case "$(stat -c '%u:%g' "$_runtime_cleanup_active" 2>/dev/null)" in
+      0:0|"$DNSCRYPT_UID:0") ;;
+      *) return 1 ;;
+    esac
+    chmod 0700 "$_runtime_cleanup_active" 2>/dev/null || return 1
+  fi
+  return 0
+}
+
 cleanup_runtime_create_path() {
   if [ ! -e "$RUNTIME_CREATE_PATH" ] && [ ! -L "$RUNTIME_CREATE_PATH" ]; then
     return 0
   fi
-  runtime_owned_aux_path_is_safe "$RUNTIME_CREATE_PATH" || return 1
+  prepare_runtime_aux_tree_for_cleanup "$RUNTIME_CREATE_PATH" || return 1
   rm -rf "$RUNTIME_CREATE_PATH" \
     && [ ! -e "$RUNTIME_CREATE_PATH" ] && [ ! -L "$RUNTIME_CREATE_PATH" ]
 }
@@ -699,8 +718,28 @@ cleanup_runtime_active_stage() {
     return 0
   fi
   runtime_active_stage_is_owned || return 1
+  chmod 0700 "$RUNTIME_ACTIVE_STAGE" 2>/dev/null || return 1
   rm -rf "$RUNTIME_ACTIVE_STAGE" \
     && [ ! -e "$RUNTIME_ACTIVE_STAGE" ] && [ ! -L "$RUNTIME_ACTIVE_STAGE" ]
+}
+
+cleanup_runtime_active_snapshot() {
+  _runtime_active_cleanup="$1"
+  [ "$_runtime_active_cleanup" = "$RUNTIME_ACTIVE_DIR" ] || return 1
+  if [ ! -e "$_runtime_active_cleanup" ] && [ ! -L "$_runtime_active_cleanup" ]; then
+    return 0
+  fi
+  runtime_active_snapshot_at_is_trusted "$_runtime_active_cleanup" || return 1
+  # Only the directory needs write permission for unlinking its entries. Never
+  # chmod the UID-owned pathnames inside it after validation: a hostile process
+  # with that UID could otherwise swap one for a symlink before root's chmod.
+  chmod 0700 "$_runtime_active_cleanup" 2>/dev/null || return 1
+  if rm -rf "$_runtime_active_cleanup" \
+    && [ ! -e "$_runtime_active_cleanup" ] && [ ! -L "$_runtime_active_cleanup" ]; then
+    return 0
+  fi
+  chmod 0500 "$_runtime_active_cleanup" 2>/dev/null || true
+  return 1
 }
 
 # Publish a disposable daemon-readable snapshot from the root-only canonical
@@ -764,8 +803,7 @@ publish_runtime_active_snapshot() {
     return 1
   fi
   if [ -e "$RUNTIME_ACTIVE_DIR" ] || [ -L "$RUNTIME_ACTIVE_DIR" ]; then
-    if [ ! -d "$RUNTIME_ACTIVE_DIR" ] || [ -L "$RUNTIME_ACTIVE_DIR" ] \
-      || ! rm -rf "$RUNTIME_ACTIVE_DIR"; then
+    if ! cleanup_runtime_active_snapshot "$RUNTIME_ACTIVE_DIR"; then
       cleanup_runtime_active_stage >/dev/null 2>&1 || true
       exec 6>&-
       return 1
@@ -825,7 +863,7 @@ remove_runtime_tree() {
     fi
   fi
   if [ -e "$RUNTIME_REMOVE_PATH" ] || [ -L "$RUNTIME_REMOVE_PATH" ]; then
-    runtime_owned_aux_path_is_safe "$RUNTIME_REMOVE_PATH" || {
+    prepare_runtime_aux_tree_for_cleanup "$RUNTIME_REMOVE_PATH" || {
       exec 6>&-
       return 1
     }

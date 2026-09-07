@@ -291,6 +291,7 @@ setup_fixture() {
 
 cleanup_fixture() {
   [ -n "$CURRENT_CASE_DIR" ] || return 0
+  chmod -R u+rwX "$CURRENT_CASE_DIR" >/dev/null 2>&1 || true
   rm -rf "$CURRENT_CASE_DIR"
   CURRENT_CASE_DIR=
 }

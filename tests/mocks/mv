@@ -29,6 +29,7 @@ fi
 if [ -n "${MOCK_CHOWN_STATE:-}" ] && [ -n "$previous_argument" ]; then
   moved_state="$MOCK_CHOWN_STATE.mv.$$"
   awk -F '|' -v source="$previous_argument" -v target="$last_argument" '
+    $2 == target || index($2, target "/") == 1 { next }
     $2 == source { print $1 "|" target; next }
     index($2, source "/") == 1 {
       print $1 "|" target substr($2, length(source) + 1)
@@ -41,6 +42,7 @@ fi
 if [ -n "${MOCK_CHMOD_STATE:-}" ] && [ -n "$previous_argument" ]; then
   moved_state="$MOCK_CHMOD_STATE.mv.$$"
   awk -F '|' -v source="$previous_argument" -v target="$last_argument" '
+    $2 == target || index($2, target "/") == 1 { next }
     $2 == source { print $1 "|" target; next }
     index($2, source "/") == 1 {
       print $1 "|" target substr($2, length(source) + 1)
