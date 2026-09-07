@@ -28,6 +28,12 @@ fi
 if [ -x "$MOCK_COMMAND_DIR/chmod" ]; then
   chmod() { "$MOCK_COMMAND_DIR/chmod" "$@"; }
 fi
+if [ -x "$MOCK_COMMAND_DIR/chown" ]; then
+  chown() { "$MOCK_COMMAND_DIR/chown" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/cmp" ]; then
+  cmp() { "$MOCK_COMMAND_DIR/cmp" "$@"; }
+fi
 if [ -x "$MOCK_COMMAND_DIR/cp" ]; then
   cp() { "$MOCK_COMMAND_DIR/cp" "$@"; }
 fi
@@ -40,11 +46,17 @@ fi
 if [ -x "$MOCK_COMMAND_DIR/head" ]; then
   head() { "$MOCK_COMMAND_DIR/head" "$@"; }
 fi
+if [ -x "$MOCK_COMMAND_DIR/kill" ]; then
+  kill() { "$MOCK_COMMAND_DIR/kill" "$@"; }
+fi
 if [ -x "$MOCK_COMMAND_DIR/ln" ]; then
   ln() { "$MOCK_COMMAND_DIR/ln" "$@"; }
 fi
 if [ -x "$MOCK_COMMAND_DIR/mkdir" ]; then
   mkdir() { "$MOCK_COMMAND_DIR/mkdir" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/mktemp" ]; then
+  mktemp() { "$MOCK_COMMAND_DIR/mktemp" "$@"; }
 fi
 if [ -x "$MOCK_COMMAND_DIR/mv" ]; then
   mv() { "$MOCK_COMMAND_DIR/mv" "$@"; }
@@ -52,11 +64,17 @@ fi
 if [ -x "$MOCK_COMMAND_DIR/rm" ]; then
   rm() { "$MOCK_COMMAND_DIR/rm" "$@"; }
 fi
+if [ -x "$MOCK_COMMAND_DIR/readlink" ]; then
+  readlink() { "$MOCK_COMMAND_DIR/readlink" "$@"; }
+fi
 if [ -x "$MOCK_COMMAND_DIR/rmdir" ]; then
   rmdir() { "$MOCK_COMMAND_DIR/rmdir" "$@"; }
 fi
 if [ -x "$MOCK_COMMAND_DIR/sed" ]; then
   sed() { "$MOCK_COMMAND_DIR/sed" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/stat" ]; then
+  stat() { "$MOCK_COMMAND_DIR/stat" "$@"; }
 fi
 if [ -x "$MOCK_COMMAND_DIR/sleep" ]; then
   sleep() { "$MOCK_COMMAND_DIR/sleep" "$@"; }
@@ -103,4 +121,7 @@ if [ -x "$MOCK_COMMAND_DIR/ip6tables" ]; then
 fi
 if [ -x "$MOCK_COMMAND_DIR/sysctl" ]; then
   sysctl() { "$MOCK_COMMAND_DIR/sysctl" "$@"; }
+fi
+if [ -x "$MOCK_COMMAND_DIR/settings" ]; then
+  settings() { "$MOCK_COMMAND_DIR/settings" "$@"; }
 fi

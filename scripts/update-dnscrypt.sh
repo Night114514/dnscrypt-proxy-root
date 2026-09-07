@@ -16,6 +16,21 @@ case "$MODE" in
     exit 64
     ;;
 esac
+INSTALLER_DOWNLOAD_ONLY="${DNSCRYPT_INSTALLER_DOWNLOAD_ONLY:-0}"
+case "$INSTALLER_DOWNLOAD_ONLY" in
+  0) ;;
+  1)
+    if [ "$MODE" != "install" ] || [ "${DNSCRYPT_INSTALLER_STAGE:-0}" != "1" ] \
+      || [ "$RUNTIME_ROOT" != "$MODDIR" ]; then
+      echo "Installer download-only mode is restricted to the staged module tree."
+      exit 64
+    fi
+    ;;
+  *)
+    echo "Invalid DNSCRYPT_INSTALLER_DOWNLOAD_ONLY value."
+    exit 64
+    ;;
+esac
 CHECK_INTERVAL_SECONDS="${DNSCRYPT_UPDATE_INTERVAL_SECONDS:-86400}"
 case "$CHECK_INTERVAL_SECONDS" in
   ""|*[!0-9]*) CHECK_INTERVAL_SECONDS=86400 ;;
@@ -32,10 +47,15 @@ mkdir -p "$RUN_DIR" "$LOG_DIR" "$TMP_BASE"
 LOCK_OWNED=0
 LOCK_FD_OPEN=0
 CONTROL_LOCK_FD_OPEN=0
+RUNTIME_CANDIDATE_BIN=
 
 # Called indirectly by the signal and exit traps below.
 # shellcheck disable=SC2317
 finish() {
+  if [ -n "$RUNTIME_CANDIDATE_BIN" ]; then
+    rm -f "$RUNTIME_CANDIDATE_BIN"
+    RUNTIME_CANDIDATE_BIN=
+  fi
   if [ "$LOCK_OWNED" -eq 1 ]; then
     lock_owner=$(cat "$LOCK_FILE" 2>/dev/null || true)
     if [ "$lock_owner" = "$LOCK_OWNER" ]; then
@@ -132,6 +152,29 @@ case "$lock_status" in
     ;;
 esac
 
+if ! ensure_runtime_tree; then
+  msg="The protected dnscrypt-proxy runtime tree is unavailable or unsafe."
+  write_update_status "error" "unknown" "$msg"
+  log_msg "$UPDATE_LOG" "$msg"
+  echo "$msg"
+  exit 1
+fi
+if shutdown_requested; then
+  msg="Module shutdown is pending; the update was not started."
+  write_update_status "error" "unknown" "$msg"
+  log_msg "$UPDATE_LOG" "$msg"
+  echo "$msg"
+  exit 1
+fi
+if [ -e "$RUNTIME_MODULE_BINARY_STAGE" ] || [ -L "$RUNTIME_MODULE_BINARY_STAGE" ] \
+  || [ -e "$RUNTIME_MODULE_BINARY_BACKUP" ] || [ -L "$RUNTIME_MODULE_BINARY_BACKUP" ]; then
+  msg="A pre-start binary transaction is pending; start-time recovery must finish before updating."
+  write_update_status "error" "unknown" "$msg"
+  log_msg "$UPDATE_LOG" "$msg"
+  echo "$msg"
+  exit 1
+fi
+
 should_skip_auto_check() {
   [ "$MODE" = "auto" ] || return 1
   [ -f "$LAST_CHECK_FILE" ] || return 1
@@ -213,7 +256,9 @@ if [ "$MODE" = "check" ]; then
   exit 0
 fi
 
-if [ "$CURRENT_VERSION" = "$LATEST_VERSION" ] && [ -x "$DNSCRYPT_BIN" ] && [ "$MODE" != "force" ] && [ "$MODE" != "install" ]; then
+if [ "$CURRENT_VERSION" = "$LATEST_VERSION" ] \
+  && runtime_binary_at_is_trusted "$DNSCRYPT_BIN" \
+  && [ "$MODE" != "force" ] && [ "$MODE" != "install" ]; then
   msg="Already up to date: $LATEST_VERSION"
   write_update_status "up_to_date" "$LATEST_VERSION" "$msg"
   log_msg "$UPDATE_LOG" "$msg"
@@ -329,7 +374,20 @@ if ! chmod 0755 "$NEW_BIN" 2>/dev/null; then
   exit 1
 fi
 
-NEW_VERSION=$("$NEW_BIN" -version 2>/dev/null | sed -n '1{s/\r$//;p;q;}')
+# Never execute or install a downloaded candidate with a missing TOML or an
+# auxiliary input that can be replaced by the runtime UID. First-install
+# templates are established by ensure_runtime_tree above, so absence is a
+# corrupted state and must fail closed as well.
+if ! runtime_config_inputs_are_trusted; then
+  msg="Canonical configuration inputs are missing or have unsafe ownership, permissions, or path type; the downloaded binary was not installed."
+  write_update_status "error" "$LATEST_VERSION" "$msg"
+  log_msg "$UPDATE_LOG" "$msg"
+  rm -rf "$WORK"
+  echo "$msg"
+  exit 1
+fi
+
+NEW_VERSION=$(binary_version_bounded "$NEW_BIN" 2>/dev/null || true)
 if [ "$NEW_VERSION" != "$LATEST_VERSION" ]; then
   msg="Downloaded binary version '$NEW_VERSION' does not match release $LATEST_VERSION."
   write_update_status "error" "$LATEST_VERSION" "$msg"
@@ -338,9 +396,43 @@ if [ "$NEW_VERSION" != "$LATEST_VERSION" ]; then
   echo "$msg"
   exit 1
 fi
-if [ -f "$CONFIG_FILE" ]; then
-  if ! (cd "$CONFIG_DIR" && "$NEW_BIN" -check -config "$CONFIG_FILE") >> "$UPDATE_LOG" 2>&1; then
-    msg="Downloaded dnscrypt-proxy rejected the active configuration; the installed binary was kept."
+if [ -f "$CONFIG_FILE" ] && [ "$INSTALLER_DOWNLOAD_ONLY" -ne 1 ]; then
+  # The extraction tree stays root-only. Copy only the verified executable into
+  # the root-owned, non-writable bin directory, then run -check through the
+  # same disposable UID3003 snapshot used by first boot.
+  RUNTIME_CANDIDATE_BIN="$BIN_DIR/.dnscrypt-proxy-candidate.$$"
+  if [ -e "$RUNTIME_CANDIDATE_BIN" ] || [ -L "$RUNTIME_CANDIDATE_BIN" ] \
+    || ! cp "$NEW_BIN" "$RUNTIME_CANDIDATE_BIN" \
+    || ! chmod 0755 "$RUNTIME_CANDIDATE_BIN" 2>/dev/null; then
+    msg="Failed to prepare a protected runtime candidate for configuration validation."
+    write_update_status "error" "$LATEST_VERSION" "$msg"
+    log_msg "$UPDATE_LOG" "$msg"
+    rm -f "$RUNTIME_CANDIDATE_BIN"
+    RUNTIME_CANDIDATE_BIN=
+    rm -rf "$WORK"
+    echo "$msg"
+    exit 1
+  fi
+  (cd "$CONFIG_DIR" && run_bounded_config_check "$CONFIG_FILE" "$UPDATE_LOG" "$RUNTIME_CANDIDATE_BIN")
+  _candidate_check_status=$?
+  rm -f "$RUNTIME_CANDIDATE_BIN"
+  RUNTIME_CANDIDATE_BIN=
+  case "$_candidate_check_status" in
+    0) ;;
+    124)
+      msg="Downloaded dnscrypt-proxy configuration/source check timed out; the installed binary was kept."
+      ;;
+    125)
+      msg="Module shutdown cancelled the downloaded binary check; the installed binary was kept."
+      ;;
+    126)
+      msg="The UID3003-traversable runtime tree is unavailable or unsafe; the downloaded binary was not executed."
+      ;;
+    *)
+      msg="Downloaded dnscrypt-proxy rejected the active configuration; the installed binary was kept."
+      ;;
+  esac
+  if [ "$_candidate_check_status" -ne 0 ]; then
     write_update_status "error" "$LATEST_VERSION" "$msg"
     log_msg "$UPDATE_LOG" "$msg"
     rm -rf "$WORK"
@@ -392,7 +484,47 @@ if shutdown_requested; then
   exit 1
 fi
 
-mkdir -p "$BIN_DIR"
+# Serialize the short persistent binary/marker commit with runtime creation and
+# removal. The global lock order is control (fd 8) then runtime-tree (fd 6), the
+# same order used by start-time binary reconciliation. Long downloads and
+# candidate checks happen before either commit lock is held.
+acquire_runtime_tree_lock
+_runtime_commit_lock_status=$?
+case "$_runtime_commit_lock_status" in
+  0) ;;
+  2) msg="Another runtime-tree operation remained active; the validated update was not installed." ;;
+  *) msg="Failed to acquire the runtime-tree lock; the validated update was not installed." ;;
+esac
+if [ "$_runtime_commit_lock_status" -ne 0 ]; then
+  write_update_status "error" "$LATEST_VERSION" "$msg"
+  log_msg "$UPDATE_LOG" "$msg"
+  rm -rf "$WORK"
+  echo "$msg"
+  exit "$_runtime_commit_lock_status"
+fi
+if ! runtime_tree_is_trusted \
+  || [ "$(runtime_operation_state 2>/dev/null)" != none ] \
+  || [ -e "$RUNTIME_CREATE_PATH" ] || [ -L "$RUNTIME_CREATE_PATH" ] \
+  || [ -e "$RUNTIME_REMOVE_PATH" ] || [ -L "$RUNTIME_REMOVE_PATH" ] \
+  || shutdown_requested; then
+  exec 6>&-
+  msg="The protected runtime tree changed or shutdown began before binary commit."
+  write_update_status "error" "$LATEST_VERSION" "$msg"
+  log_msg "$UPDATE_LOG" "$msg"
+  rm -rf "$WORK"
+  echo "$msg"
+  exit 1
+fi
+
+if [ ! -d "$BIN_DIR" ] || [ -L "$BIN_DIR" ]; then
+  exec 6>&-
+  msg="The protected runtime binary directory disappeared before commit."
+  write_update_status "error" "$LATEST_VERSION" "$msg"
+  log_msg "$UPDATE_LOG" "$msg"
+  rm -rf "$WORK"
+  echo "$msg"
+  exit 1
+fi
 WAS_RUNNING=0
 is_dnscrypt_running && WAS_RUNNING=1
 HAD_OLD_BINARY=0
@@ -479,6 +611,7 @@ restore_old_version_marker() {
 
 _version_tmp="$INSTALLED_VERSION_FILE.$$.tmp"
 if ! printf '%s\n' "$LATEST_VERSION" > "$_version_tmp" \
+  || ! chmod 0600 "$_version_tmp" 2>/dev/null \
   || ! mv -f "$_version_tmp" "$INSTALLED_VERSION_FILE"; then
   rm -f "$_version_tmp"
   _marker_rollback_binary=0
@@ -507,6 +640,11 @@ if ! printf '%s\n' "$LATEST_VERSION" > "$_version_tmp" \
   echo "$msg"
   exit 1
 fi
+
+# restart_service needs to take the same runtime-tree lock while publishing its
+# active snapshot, so release fd 6 immediately after the atomic binary/marker
+# commit. The inherited control lock remains held across restart and rollback.
+exec 6>&-
 
 if [ "$WAS_RUNNING" -eq 1 ]; then
   if ! DNSCRYPT_CONTROL_LOCK_HELD=1 \

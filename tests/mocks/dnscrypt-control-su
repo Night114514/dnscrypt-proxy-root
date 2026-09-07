@@ -1,0 +1,11 @@
+#!/bin/sh
+set -u
+
+[ "$#" -eq 3 ] || exit 64
+[ "$1" = 3003 ] || exit 64
+[ "$2" = -c ] || exit 64
+printf 'su %s\n' "$*" >> "$MOCK_CALL_LOG"
+MOCK_DNSCRYPT_SU_ACTIVE=1 "$MOCK_HOST_SH" -c "$3"
+mock_su_status=$?
+printf 'su-status %s\n' "$mock_su_status" >> "$MOCK_CALL_LOG"
+exit "$mock_su_status"

@@ -2,7 +2,9 @@
  * DNS Leak Test addon.
  * Injects a "洩漏檢測" button into the DNS test card once the React app has
  * mounted, runs `dnscrypt-control.sh leak-test` via the KernelSU/APatch WebUI
- * exec bridge, and renders the verdict. Fully offline; no remote resources.
+ * exec bridge, and renders the sampled result. It contacts no dedicated
+ * leak-test website, but its synthetic queries still use the configured
+ * DNS/upstream path.
  */
 (function () {
   "use strict";
@@ -67,10 +69,12 @@
   }
 
   var VERDICTS = {
-    protected: { color: "#22c55e", text: "未檢測到洩漏，DNS 流量已受保護" },
-    partial: { color: "#eab308", text: "檢測到部分洩漏" },
-    leaking: { color: "#ef4444", text: "DNS 流量正在洩漏！未經過 dnscrypt-proxy" }
+    protected: { color: "#22c55e", text: "所有測試查詢都出現在 dnscrypt-proxy 日誌中" },
+    partial: { color: "#eab308", text: "只有部分測試查詢出現在 dnscrypt-proxy 日誌中；請檢查可能的繞過或查詢／日誌失敗" },
+    leaking: { color: "#ef4444", text: "沒有測試查詢出現在 dnscrypt-proxy 日誌中；請檢查可能的繞過或查詢／日誌失敗" },
+    not_applicable: { color: "#94a3b8", text: "upstream_only 模式不執行全域 DNS 攔截，這項抽樣不適用" }
   };
+  var SCOPE_NOTE = "。此抽樣測試不涵蓋 App 自有 DoH／DoT 或所有 DNS 路徑";
 
   function buildUI() {
     var wrap = document.createElement("div");
@@ -109,14 +113,17 @@
         } else if (data.status === "error" && data.reason === "query_log_disabled") {
           result.style.color = VERDICTS.partial.color;
           result.textContent = "查詢日誌 (query_log) 未啟用，無法進行洩漏檢測";
-        } else {
-          var v = VERDICTS[data.status] || VERDICTS.leaking;
+        } else if (Object.prototype.hasOwnProperty.call(VERDICTS, data.status)) {
+          var v = VERDICTS[data.status];
           result.style.color = v.color;
           var detail = "";
           if (typeof data.matched === "number" && typeof data.tested === "number") {
             detail = "（" + data.matched + "/" + data.tested + " 命中）";
           }
-          result.textContent = v.text + detail;
+          result.textContent = v.text + detail + SCOPE_NOTE;
+        } else {
+          result.style.color = VERDICTS.leaking.color;
+          result.textContent = "檢測失敗，收到未知結果";
         }
       }).catch(function () {
         result.style.color = VERDICTS.leaking.color;

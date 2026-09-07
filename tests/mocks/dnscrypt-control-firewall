@@ -5,6 +5,151 @@ tool=${0##*/}
 arguments=$*
 printf '%s %s\n' "$tool" "$arguments" >> "$MOCK_CALL_LOG"
 
+managed_policy=${MOCK_MANAGED_FIREWALL_POLICY:-present}
+if [ "${MOCK_FIREWALL_STATEFUL:-0}" = 1 ] \
+  && [ -f "${MOCK_MANAGED_FIREWALL_POLICY_FILE:-}" ]; then
+  managed_policy=$(cat "$MOCK_MANAGED_FIREWALL_POLICY_FILE")
+fi
+
+ownership_token=
+if [ -f "$MOCK_FIREWALL_STATE/ownership-token" ]; then
+  ownership_token=$(cat "$MOCK_FIREWALL_STATE/ownership-token")
+elif [ -f "$MODULE_DIR/state/firewall-owned.state" ]; then
+  marker_value=$(cat "$MODULE_DIR/state/firewall-owned.state")
+  case "$marker_value" in *:*) ownership_token=${marker_value#*:} ;; esac
+fi
+
+case "$tool $arguments" in
+  "iptables -t nat -S DNSCRYPT_PROXY")
+    case "$managed_policy" in
+      present)
+        printf '%s\n' '-N DNSCRYPT_PROXY'
+        if [ -n "$ownership_token" ]; then
+          printf '%s\n' "-A DNSCRYPT_PROXY -m owner --uid-owner 3003 -m comment --comment \"dnscrypt-proxy-root:$ownership_token\" -j RETURN"
+        else
+          printf '%s\n' '-A DNSCRYPT_PROXY -m owner --uid-owner 3003 -j RETURN'
+        fi
+        printf '%s\n' \
+          '-A DNSCRYPT_PROXY -d 127.0.0.0/8 -j RETURN' \
+          '-A DNSCRYPT_PROXY -p udp -m udp --dport 53 -j DNAT --to-destination 127.0.0.1:5354' \
+          '-A DNSCRYPT_PROXY -p tcp -m tcp --dport 53 -j DNAT --to-destination 127.0.0.1:5354'
+        exit 0
+        ;;
+      foreign)
+        printf '%s\n' '-N DNSCRYPT_PROXY' '-A DNSCRYPT_PROXY -j ACCEPT'
+        exit 0
+        ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  "ip6tables -t filter -S DNSCRYPT_PROXY6")
+    case "$managed_policy" in
+      present)
+        printf '%s\n' '-N DNSCRYPT_PROXY6'
+        if [ -n "$ownership_token" ]; then
+          printf '%s\n' "-A DNSCRYPT_PROXY6 -m owner --uid-owner 3003 -m comment --comment \"dnscrypt-proxy-root:$ownership_token\" -j RETURN"
+        else
+          printf '%s\n' '-A DNSCRYPT_PROXY6 -m owner --uid-owner 3003 -j RETURN'
+        fi
+        printf '%s\n' \
+          '-A DNSCRYPT_PROXY6 -p udp -m udp --dport 53 -j REJECT' \
+          '-A DNSCRYPT_PROXY6 -p tcp -m tcp --dport 53 -j REJECT'
+        exit 0
+        ;;
+      foreign)
+        printf '%s\n' '-N DNSCRYPT_PROXY6' '-A DNSCRYPT_PROXY6 -j ACCEPT'
+        exit 0
+        ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  "iptables -t nat -S OUTPUT")
+    case "$managed_policy" in
+      present)
+        if [ "${MOCK_FIREWALL_STATEFUL:-0}" = 1 ] \
+          && [ -f "$MOCK_FIREWALL_STATE/ipv4-output-order" ]; then
+          while IFS= read -r protocol; do
+            printf '%s\n' "-A OUTPUT -p $protocol -m $protocol --dport 53 -j DNSCRYPT_PROXY"
+          done < "$MOCK_FIREWALL_STATE/ipv4-output-order"
+          printf '%s\n' '-A OUTPUT -j THIRD_PARTY_NAT'
+        else
+          printf '%s\n' \
+            '-A OUTPUT -p tcp -m tcp --dport 53 -j DNSCRYPT_PROXY' \
+            '-A OUTPUT -p udp -m udp --dport 53 -j DNSCRYPT_PROXY' \
+            '-A OUTPUT -j THIRD_PARTY_NAT'
+        fi
+        ;;
+      foreign) printf '%s\n' '-A OUTPUT -j FOREIGN_DNS_CHAIN' ;;
+    esac
+    exit 0
+    ;;
+  "ip6tables -t filter -S OUTPUT")
+    case "$managed_policy" in
+      present) printf '%s\n' '-A OUTPUT -j DNSCRYPT_PROXY6' '-A OUTPUT -j THIRD_PARTY_FILTER' ;;
+      foreign) printf '%s\n' '-A OUTPUT -j FOREIGN_DNS6_CHAIN' ;;
+    esac
+    exit 0
+    ;;
+esac
+
+# Mode-policy tests need -C to distinguish module-owned rules from unrelated
+# direct firewall rules. Keep the historical default (all checks succeed) so
+# existing fixtures retain their original behavior unless a case opts in.
+case " $arguments " in
+  *" -C OUTPUT "*" -j DNSCRYPT_PROXY "*|*" -C DNSCRYPT_PROXY "*|\
+  *" -C OUTPUT -j DNSCRYPT_PROXY6 "*|*" -C DNSCRYPT_PROXY6 "*)
+    [ "$managed_policy" = "present" ]
+    exit $?
+    ;;
+esac
+
+case "$tool $arguments" in
+  "iptables -t nat -N DNSCRYPT_PROXY"|"ip6tables -t filter -N DNSCRYPT_PROXY6")
+    [ "$managed_policy" = absent ]
+    exit $?
+    ;;
+esac
+
+if [ "${MOCK_FIREWALL_STATEFUL:-0}" = 1 ]; then
+  case " $arguments " in
+    *" -A DNSCRYPT_PROXY -m owner --uid-owner 3003 -m comment --comment dnscrypt-proxy-root:"*)
+      ownership_token=${arguments#*dnscrypt-proxy-root:}
+      ownership_token=${ownership_token%% *}
+      printf '%s\n' "$ownership_token" > "$MOCK_FIREWALL_STATE/ownership-token"
+      printf '%s\n' present > "$MOCK_MANAGED_FIREWALL_POLICY_FILE"
+      ;;
+    *" -I OUTPUT 1 -p udp --dport 53 -j DNSCRYPT_PROXY "*)
+      _old_order=$(cat "$MOCK_FIREWALL_STATE/ipv4-output-order" 2>/dev/null || true)
+      { printf '%s\n' udp; [ -z "$_old_order" ] || printf '%s\n' "$_old_order"; } \
+        > "$MOCK_FIREWALL_STATE/ipv4-output-order"
+      printf '%s\n' present > "$MOCK_MANAGED_FIREWALL_POLICY_FILE"
+      ;;
+    *" -I OUTPUT 1 -p tcp --dport 53 -j DNSCRYPT_PROXY "*)
+      _old_order=$(cat "$MOCK_FIREWALL_STATE/ipv4-output-order" 2>/dev/null || true)
+      { printf '%s\n' tcp; [ -z "$_old_order" ] || printf '%s\n' "$_old_order"; } \
+        > "$MOCK_FIREWALL_STATE/ipv4-output-order"
+      printf '%s\n' present > "$MOCK_MANAGED_FIREWALL_POLICY_FILE"
+      ;;
+    *" -I OUTPUT "*" -j DNSCRYPT_PROXY "*|*" -I OUTPUT "*" -j DNSCRYPT_PROXY6 "*)
+      printf '%s\n' present > "$MOCK_MANAGED_FIREWALL_POLICY_FILE"
+      ;;
+    *" -X DNSCRYPT_PROXY "*|*" -X DNSCRYPT_PROXY6 "*)
+      printf '%s\n' absent > "$MOCK_MANAGED_FIREWALL_POLICY_FILE"
+      rm -f "$MOCK_FIREWALL_STATE/ipv4-output-order"
+      rm -f "$MOCK_FIREWALL_STATE/ownership-token"
+      ;;
+  esac
+fi
+
+case " $tool $arguments " in
+  *" ip6tables -t filter -C OUTPUT -p udp --dport 53 -j REJECT "*|\
+  *" ip6tables -t filter -C OUTPUT -p tcp --dport 53 -j REJECT "*|\
+  *" ip6tables -t filter -C INPUT -p udp --dport 53 -j REJECT "*)
+    [ "${MOCK_FOREIGN_IPV6_REJECTS:-absent}" = "present" ]
+    exit $?
+    ;;
+esac
+
 key=
 case "$tool $arguments" in
   "iptables "*" -D OUTPUT -p udp --dport 53 -j DNSCRYPT_PROXY") key=iptables-output-udp ;;
@@ -22,6 +167,12 @@ if [ -n "$key" ]; then
   count=0
   [ ! -f "$state_file" ] || count=$(cat "$state_file")
   if [ "$count" -lt 2 ]; then
+    case "$key" in
+      iptables-output-udp|iptables-output-tcp)
+        [ "${MOCK_FIREWALL_STATEFUL:-0}" != 1 ] \
+          || rm -f "$MOCK_FIREWALL_STATE/ipv4-output-order"
+        ;;
+    esac
     count=$((count + 1))
     printf '%s\n' "$count" > "$state_file"
     exit 0

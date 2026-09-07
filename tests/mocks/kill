@@ -1,0 +1,13 @@
+#!/bin/sh
+set -u
+
+printf 'kill %s\n' "$*" >> "$MOCK_CALL_LOG"
+if [ "${MOCK_KILL_MODE:-normal}" = replace_after_term ] \
+  && [ "${1:-}" = -TERM ] && [ "$#" -eq 2 ]; then
+  # Replace the injected /proc identity before terminating the original child.
+  # This models PID reuse without depending on a two-second wall-clock race.
+  printf '%s\0%s\0' foreign-process '--not-dnscrypt' \
+    > "$DNSCRYPT_PROC_ROOT/$2/cmdline"
+  exec "$MOCK_HOST_KILL" "$@"
+fi
+exec "$MOCK_HOST_KILL" "$@"

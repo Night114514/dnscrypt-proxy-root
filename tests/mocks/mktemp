@@ -1,0 +1,21 @@
+#!/bin/sh
+set -u
+
+template=${1:-}
+case "${MOCK_MKTEMP_MODE:-normal}:$template" in
+  symlink_stage:*quick-stage.XXXXXX)
+    forced_path=${template%XXXXXX}forced
+    rm -f "$forced_path"
+    ln -s "$MOCK_MKTEMP_SYMLINK_TARGET" "$forced_path" || exit 1
+    printf '%s\n' "$forced_path"
+    ;;
+  symlink_restore:*quick-restore.XXXXXX)
+    forced_path=${template%XXXXXX}forced
+    rm -f "$forced_path"
+    ln -s "$MOCK_MKTEMP_SYMLINK_TARGET" "$forced_path" || exit 1
+    printf '%s\n' "$forced_path"
+    ;;
+  *)
+    exec "$MOCK_HOST_MKTEMP" "$@"
+    ;;
+esac

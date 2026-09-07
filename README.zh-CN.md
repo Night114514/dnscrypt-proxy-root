@@ -5,9 +5,11 @@
 一个 systemless 的 Magisk/KernelSU/APatch 模块，在已 root 的 Android 设备上运行 **dnscrypt-proxy**，具备：
 
 - **Systemless 加密 DNS**：通过 dnscrypt-proxy（DNSCrypt / DoH）
-- **兼容 Magisk、KernelSU 与 APatch**
-- **自动 DNS 重定向**：通过 iptables DNAT 覆盖所有 App（透明代理，无需逐个设置）
-- **IPv6 DNS 泄漏防护**：以 ip6tables 阻挡 IPv6 明文 DNS
+- **以 Magisk、KernelSU 与 APatch 为封装目标**；v0.9.1 的管理器／真机矩阵仍为
+  [NOT RUN](REAL_DEVICE_ACCEPTANCE.md)，本版本不声称已经验证兼容性
+- **两种明确集成模式**：默认 `strict` 全系统 Do53 拦截，或以 `upstream_only`
+  与 Android Private DNS、VPN 及其他 DNS 前端共存
+- **`strict` 模式的 IPv6 DNS 泄漏防护**：仅通过模块自有的 ip6tables 链阻挡
 - **DNSSEC + NOLOG 解析器筛选**（`require_dnssec` / `require_nolog`）
 - **自动二进制更新**：来自上游 releases
 - **WebUI**：供 KernelSU/APatch 管理器使用（配置、日志、统计）
@@ -15,7 +17,7 @@
 - **多语言支持**（English、繁體中文、简体中文）
 - **DNS 查询统计**仪表盘
 - **屏蔽列表／允许列表**图形化管理
-- **DNS 泄漏检测** — 验证你的 DNS 流量是否确实经过 dnscrypt-proxy *(v0.7.0)*
+- **DNS 路径抽样检测** — 检查合成系统 DNS 查询是否出现在 dnscrypt-proxy 日志中 *(v0.7.0)*
 - **服务监控 (watchdog) 与 Android 通知** — 服务异常停止时自动重启并通知 *(v0.7.0)*
 - **WebUI 深色／浅色主题切换** *(v0.7.0)*
 - **GitHub Actions CI/CD**：自动化模块发版
@@ -25,7 +27,8 @@
 ## 系统需求
 
 - Android 7.0 以上（API 24+）
-- 下列其一：**Magisk 20.4+**、**KernelSU 0.7.0+** 或 **APatch 10596+**
+- 封装目标（v0.9.1 尚未完成真机验收）：**Magisk 20.4+**、**KernelSU 0.7.0+** 或
+  **APatch 10596+**
 - 更新器需要 `flock`（Android 7+ 的 Toybox 已提供；若系统命令不可用，将改用 root 管理器的 BusyBox）
 - 内核需支持 **iptables NAT**（绝大多数设备均支持）
 - WebUI 管理界面需要 KernelSU 或 APatch（Magisk 没有 WebUI；在 Magisk 上，action 按钮改为切换服务开关）
@@ -38,7 +41,17 @@
 2. 通过 **Magisk Manager**、**KernelSU Manager** 或 **APatch Manager** 刷入。
 3. 重启。
 
-模块会在安装过程中自动下载对应你设备架构的 dnscrypt-proxy 二进制文件。
+安装程序会尝试下载符合检测架构的 dnscrypt-proxy 二进制文件；只有 release asset digest 与
+二进制文件报告的版本均验证通过才会接受。下载失败会显示警告，但不会中止刷入；首次启动会在
+启动 daemon 前重试，也可稍后通过 action 按钮或 KernelSU/APatch WebUI 重试。由于 root 管理器
+会把模块暂存在 `/data/adb` 下，安装阶段刻意不执行真实配置／source `-check`；该检查延后到
+首次启动，待 `/data/local/dnscrypt-proxy-root-runtime` 的受保护运行时副本创建后再执行。
+
+> **v0.9.1 升级警告：**如果要覆盖安装 v0.9.0 或更旧版本，请先导出或记录配置、列表与
+> 订阅。v0.9.0 允许 UID 3003 写入整个 config 目录；更早版本的布局也不符合 v0.9.1
+> 强化后的迁移来源验证。安装程序因此会为这些版本一律安装经过审计的默认值；重启后
+> 请重新应用配置。从 v0.6.0 至 v0.8.0 升级时必须重启，让内核安全清除无法区分来源的
+> 旧式 IPv6 直接规则。
 
 ---
 
@@ -65,17 +78,74 @@ WebUI 支持 **English**、**繁體中文** 与 **简体中文**，并依系统�
 
 ## 工作原理
 
-### DNS 重定向
+### 受保护的运行时副本
+
+`/data/adb/modules/dnscrypt-proxy-root` 下的模块目录保存经过审计的配置模板、控制脚本、
+WebUI，以及安装下载成功时通过 digest／版本验证的二进制文件。若该文件不存在，首次启动必须
+先下载并验证后才会启动 daemon。服务会在 `/data/local/dnscrypt-proxy-root-runtime` 创建另一份
+持久化运行树；这是文件副本，不是 bind mount 或 mount namespace overlay。模块会从这个可穿越
+的运行树，以数值 UID 3003 直接执行 daemon 与 `-check`，因此不会由 root 进程要求上游程序解析
+运行时配置，UID 3003 也不必穿越 root-only 的 `/data/adb` 路径。生命周期匹配仍接受上游 2.1.18
+精确的可选 `-child` 形式，但 v0.9.1 的正常启动一开始就是最终 UID，不需要再次 exec。
+
+运行时根目录与 `bin` 为 `root:root 0755`。正本 `config` 为 `root:root 0700`，五个受管输入文件
+（以及存在时的 `subscriptions.json`）为 `root:root 0600`。每次启动前，模块会发布一份
+`3003:root 0500` 的一次性 `active` 快照，其五个输入文件为 `3003:root 0400`；由于进程已经是最终
+UID，快照会移除 `user_name`。可变的 query／NX log 与 resolver cache 位于 `3003:root 0700`
+的 `data`，PID handshake 为 `3003:root 0600`。root 拥有的 `0600` `.layout-owner` 标记必须是
+唯一一行以 LF 结尾的 `dnscrypt-proxy-root:5`。若现有目录没有标记、父路径／路径不安全、是符号
+链接，或 ownership／mode 不符，服务会将其视为冲突并 fail-closed，不接管也不覆盖。卸载也只会
+在相同路径、ownership、mode、事务状态与标记验证通过后删除该运行树。
+
+### DNS 集成模式
+
+集成模式以 root-only 模块状态保存，与 `dnscrypt-proxy.toml` 分离。状态文件不存在时默认
+为 `strict`；内容无效或为符号链接时会 fail-closed。daemon 健康时切换模式不会重启：
+
+```sh
+sh /data/adb/modules/dnscrypt-proxy-root/scripts/dnscrypt-control.sh get-dns-mode
+sh /data/adb/modules/dnscrypt-proxy-root/scripts/dnscrypt-control.sh set-dns-mode strict
+sh /data/adb/modules/dnscrypt-proxy-root/scripts/dnscrypt-control.sh set-dns-mode upstream_only
+```
+
+默认 **`strict`** 模式：
 
 - dnscrypt-proxy 监听于 `127.0.0.1:5354`。
 - 在 `OUTPUT` 链中的 iptables NAT 链（`DNSCRYPT_PROXY`）会将所有对外的明文 DNS 查询（UDP/TCP port 53）DNAT 到 `127.0.0.1:5354`。
 - 启用 `net.ipv4.conf.all.route_localnet=1`，让内核不会丢弃从 `OUTPUT` 链 DNAT 到 loopback 地址的数据包（没有这一项，重定向会完全失效）。
-- dnscrypt-proxy 会降权为 Android 保留的 AID_INET 身份（`3003`）。只有此专用 UID 与 `127.0.0.0/8` loopback 范围使用 `RETURN` 规则，避免 bootstrap／netprobe 流量递归回代理。模块不再全局放行任何上游目标，因此普通 App 无法直接查询 bootstrap IP 来绕过保护。
-- 由于 dnscrypt-proxy 仅监听 IPv4，IPv6 明文 DNS（port 53）会以 `ip6tables` `REJECT` 规则阻挡，避免未加密的 IPv6 DNS 泄漏。
+- dnscrypt-proxy 以 Android 的数值 AID_INET 身份（`3003`）运行。只有 effective UID 为 3003 的流量与 `127.0.0.0/8` loopback 范围使用 `RETURN` 规则，避免 bootstrap／netprobe 流量递归回代理。模块不再全局放行任何上游目标，因此普通 App 无法直接查询 bootstrap IP 来绕过保护。
+- 由于 dnscrypt-proxy 仅监听 IPv4，IPv6 明文 DNS（port 53）会在模块自有的
+  `DNSCRYPT_PROXY6` 链中阻挡。随机代际 token 会把两条模块链绑定到 root-only 的本次启动
+  状态；未证明归属的同名链，以及 VPN、防火墙或其他模块的同型直接规则都会保留。
+- 仅在确认精确 daemon、UID 3003、TCP/UDP listener，且有界、与上游无关的 canary 查询收到
+  精确的本地合成 NXDOMAIN 响应后，才会保存并关闭 Android Private DNS；停止服务或离开
+  `strict` 时会还原。
+
+**`upstream_only`** 模式只维持 `127.0.0.1:5354` 的 dnscrypt-proxy listener，不安装全局
+iptables/ip6tables 规则、不修改 `route_localnet`、也不更改 Android Private DNS。VPN 型过滤器
+等本地 DNS 前端可将它作为上游；全系统防漏须由该前端负责，因此模块的 leak-test 会返回
+`not_applicable`。
+
+两种模式冷启动时，都会先在系统 DNS fail-open 状态，以 UID 3003 从一次性运行时快照执行
+真实 `dnscrypt-proxy -check` source/cache 预检（硬上限 660 秒），再按上游 2.1.18 语义执行最长 3600 秒的 NetProbe，
+并保留 30 秒 listener 稳定时间。仅在预检成功，且精确 PID、UID 3003、
+`127.0.0.1:5354` 的 TCP LISTEN、UDP bound socket 与本地合成 DNS 响应有界探针
+全部通过后才应用策略。
+停用、移除或关机时会立即取消尚在执行的预检与 listener 等待，不会等待完整超时。
+
+运行时配置正本仅允许 root 访问。daemon 只能读取每次新发布、由 UID 3003 拥有的只读运行快照，
+并只可写入独立的 UID-3003 `data` 目录；模块主服务日志维持 root-only。staging、备份、验证、
+回滚与提交都会重验文件类型、owner、mode 与 device/inode 身份。所有控制与更新入口也会拒绝
+不安全的受管输入；query／NX-log 诊断会先以 UID 3003 复制有大小上限的快照，再交由 root 解析，
+而不是在检查后重新打开 daemon 可控制的路径。
 
 ### skip_mount
 
-`skip_mount` 文件刻意存在，因为本模块**不会**覆盖任何 system 分区文件。所有组件（二进制、配置、webroot）都位于模块目录内，以独立 daemon 搭配 iptables 重定向运行。跳过 mount 阶段可避免不必要的开销。
+`skip_mount` 文件刻意存在，因为本模块**不会**覆盖任何 system 分区文件。模块目录提供脚本、
+WebUI、经过审计的模板，以及安装程序成功验证的二进制文件（如有）；daemon 则从
+`/data/local/dnscrypt-proxy-root-runtime` 的独立持久化副本运行。本设计不使用 bind mount
+或依赖 mount namespace；跳过 root 管理器的 system overlay mount 阶段，不会阻止创建该
+`/data/local` 运行树。
 
 ### 自动更新（设备端）
 
@@ -84,7 +154,7 @@ WebUI 支持 **English**、**繁體中文** 与 **简体中文**，并依系统�
 1. 查询 GitHub API 获取最新 dnscrypt-proxy release
 2. 与当前安装版本比较
 3. 若有新版，下载对应架构的 asset
-4. 解压并原子性地替换二进制文件
+4. 解压、验证并原子性替换受保护 `/data/local` 运行树内的二进制文件
 5. 更新模块元数据
 
 检查频率限制为每 24 小时一次（可通过 `DNSCRYPT_UPDATE_INTERVAL_SECONDS` 配置）。
@@ -110,18 +180,21 @@ DNS 测试页面新增了 **泄漏检测** 按钮。按下后，后端（`dnscry
 1. 生成 4 个随机的 `[a-z0-9-]` 子域名。
 2. **通过系统 DNS 路径**解析每一个（而非直接连向 dnscrypt-proxy），模拟一般 App 受 iptables 重定向的查询。
 3. 稍等片刻后，在 dnscrypt-proxy 的查询日志（以及 `nx.log`）中比对每个子域名。
-4. 以单行 JSON 回报判定：
-   - `protected` — 4 个全部出现在日志中；DNS 流量确实经过 dnscrypt-proxy。
-   - `partial` — 部分出现；可能有部分泄漏。
-   - `leaking` — 全部未出现；DNS 流量绕过了 dnscrypt-proxy。
+4. 以单行 JSON 回报抽样日志可见性（为了 API 兼容而保留旧状态名称）：
+   - `protected` — 4 个测试查询全都出现在 dnscrypt-proxy 日志中。
+   - `partial` — 只有部分测试查询出现；请检查可能的绕过或查询／日志失败。
+   - `leaking` — 测试查询全都未出现；请检查可能的绕过或查询／日志失败。
 
-若查询日志未启用，会返回 `{"status":"error","reason":"query_log_disabled"}`，WebUI 会提示你启用。检测全程不连接任何远端服务——完全在本机运行。
+若查询日志未启用，会返回 `{"status":"error","reason":"query_log_disabled"}`，WebUI 会提示你启用。检测不会连接专用的第三方泄漏测试网站，但合成 DNS 查询仍会经过已配置的 DNS／上游路径，并可能出现在网络或上游 resolver 日志中。此抽样不涵盖 App 自有 DoH／DoT、所有 DNS 路径，也不能证明全系统没有泄漏。
 
 ### 服务监控 (Watchdog) 与通知 *(v0.7.0)*
 
 `service.sh` 会启动一个后台 watchdog，每 60 秒检查服务一次：
 
-- 若 dnscrypt-proxy **非人为地**停止（即并非用户主动停止——以 `run/user_stopped` 标记文件追踪），会发出 Android 通知并**自动重启服务一次**。重启成功后会再发出「服务已恢复」通知。
+- 若精确进程、UID、本地 TCP/UDP listener、本地 handler 有界探针或所选集成策略非人为地异常，会发出 Android
+  通知，并以默认 60、120、240、480、900 秒的上限倍增退避重试。健康恢复、人为停止、
+  正在启动或并行人工控制会重置延迟。飞行模式、Wi-Fi 中断与上游 resolver 离线只会
+  标记为 `degraded`，不会重启仍健康的本地 daemon。
 - 通知每次开机上限为 **3 次**，避免 crash loop 灌爆状态栏。
 - 上游二进制更新成功后也会发出通知。更新失败则保持安静（仅记录日志），以免造成噪音。
 
@@ -145,7 +218,7 @@ dnscrypt-proxy-root/
 │       ├── release.yml          # 经验证的模块版本发版
 │       └── test.yml             # dash/BusyBox ash 测试与 ShellCheck
 ├── config/
-│   └── dnscrypt-proxy.toml      # 默认配置
+│   └── dnscrypt-proxy.toml      # 随模块封装的默认模板
 ├── scripts/
 │   ├── common.sh                # 共用工具函数
 │   ├── dnscrypt-control.sh      # 服务控制与 WebUI API
@@ -171,7 +244,10 @@ dnscrypt-proxy-root/
 
 ## 配置
 
-默认配置位于 `<模块目录>/config/dnscrypt-proxy.toml`。主要设置：
+随模块封装的默认模板位于 `<模块目录>/config/dnscrypt-proxy.toml`。首次启动后，可编辑的
+root-only 权威配置为 `/data/local/dnscrypt-proxy-root-runtime/config/dnscrypt-proxy.toml`；
+daemon 会读取由它生成的只读运行快照。请通过 WebUI 修改权威配置，或以 root 直接编辑
+该持久化路径；模块模板只用于初次创建运行树。主要设置：
 
 - **listen_addresses**：`127.0.0.1:5354`
 - **server_names**：`cloudflare`、`quad9-dnscrypt-ip4-filter-pri`
@@ -206,13 +282,40 @@ dnscrypt-proxy-root/
 
 ## 已知限制
 
-- **尚未支持加密的 IPv6 DNS。** dnscrypt-proxy 被配置为仅监听 IPv4（`127.0.0.1:5354`）；为防止泄漏，IPv6 明文 DNS（port 53）会被*阻挡*而非重定向。仅使用 IPv6 进行 DNS 的 App 会回退到 IPv4。
+- **尚未支持加密的 IPv6 DNS。** dnscrypt-proxy 被配置为仅监听 IPv4（`127.0.0.1:5354`）；为防止泄漏，IPv6 明文 DNS（port 53）会被*阻挡*而非重定向。在 `strict` 模式下，客户端必须支持并实际使用 IPv4 DNS fallback；否则仅支持 IPv6 的 DNS 客户端查询会失败。
 - **需要 iptables NAT 支持。** 少数大幅精简的自定义 ROM 其内核缺少 NAT/`route_localnet`，透明重定向无法工作。
 - DNS 重定向仅涵盖 port 53（Do53）。硬编码自身 DoH/DoT 端点的 App（例如某些浏览器）依设计绕过系统解析器，不受影响。
+- `strict` 只拥有模块的 OUTPUT jump 与专用链；不声称涵盖 PREROUTING／热点客户端，
+  也没有特定 VPN／fake-IP／TUN 的推测性豁免。
+- `upstream_only` 刻意不提供全系统拦截或通用 DNS 泄漏判定。
+- 持久化 `/data/local` 运行时副本的 SELinux 执行／访问行为，以及 Magisk、KernelSU、
+  APatch 的生命周期兼容性（包括 Xiaomi 14T Pro／Android 16 参考环境）均为 **NOT RUN
+  （未执行）**；本版本不声称兼容这些组合。
+- Xiaomi 14T Pro／Android 16 与特定 VPN 产品的互操作性仍属人工验收项目；CI 验证的是可移植
+  shell 行为，不能声称覆盖这些真机组合。请按[真机验收表](REAL_DEVICE_ACCEPTANCE.md)
+  保留 argv／UID／socket／规则计数器与实际 DNS 出口证据；v0.9.1 各行目前明确标为
+  **NOT RUN（未执行）**。
 
 ---
 
 ## 变更日志
+
+### v0.9.1 (2026-09-07)
+
+- 支持 dnscrypt-proxy 2.1.18 精确的可选 `-child` exec 形式，分别验证 UID 3003、实际
+  TCP/UDP socket、本地合成 NXDOMAIN 响应与上游可达性。
+- daemon 与 `-check` 均以 UID 3003 从经过标记及权限验证的持久化
+  `/data/local/dnscrypt-proxy-root-runtime` 一次性快照运行；root-only 正本、UID-3003 只读
+  运行快照及可变 data 分离。不安全或无标记的冲突会 fail-closed，卸载只删除验证过的自有树。
+- 新增可事务切换的 `strict`／`upstream_only`、有界 source/cache 预检、符合上游语义的
+  NetProbe 宽限、degraded/offline 状态与有上限的 watchdog 倍增退避。
+- 使用 token 绑定的本次启动 ownership／adoption marker 与完整规则顺序验证，保留未证明归属的同名链
+  或直接第三方规则，且仅在 listener 就绪后应用 strict 重定向。
+- quick-mode 改为保守 TOML lexer、受保护 staging/inode 验证、原子替换及重启失败回滚；
+  root-only 配置正本与 UID-3003 只读快照会隔离控制平面及 daemon 可写数据。
+- 扩充 dash／BusyBox ash 的生命周期、更新器、socket、模式、防火墙与 TOML 测试。
+- 升级时重置不符合新版迁移来源验证边界的 v0.9.0（含）以前配置；请先导出、重启，
+  再重新应用。
 
 ### v0.9.0 (2026-08-29)
 
@@ -237,7 +340,7 @@ dnscrypt-proxy-root/
 ### v0.7.0 (2026-07-23)
 
 **新功能**
-- **DNS 泄漏检测**：新增 `leak-test` 命令与 WebUI 按钮，通过系统 DNS 路径解析随机子域名，并检查查询日志以确认流量已加密（protected／partial／leaking 判定）。
+- **DNS 路径抽样检测**：新增 `leak-test` 命令与 WebUI 按钮，通过系统 DNS 路径解析随机子域名，并回报哪些样本出现在查询日志；为兼容而保留的 protected／partial／leaking 名称不能证明所有 DNS 路径都已加密。
 - **服务监控 + Android 通知**：`service.sh` 每 60 秒监控 daemon，异常停止时自动重启一次，并通过 `cmd notification post` 通知（每次开机上限 3 次，并以「用户停止」标记避免误报）。二进制更新成功时也会通知。
 - **深色／浅色主题切换**：WebUI 切换按钮，具 `localStorage` 持久化，默认为 AMOLED 深色配色。
 

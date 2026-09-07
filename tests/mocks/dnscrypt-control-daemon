@@ -1,0 +1,151 @@
+#!/bin/sh
+set -u
+
+runtime_config="${DNSCRYPT_RUNTIME_ROOT:-$MODULE_DIR}/config/dnscrypt-proxy.toml"
+config_argument=
+previous_argument=
+for argument in "$@"; do
+  if [ "$previous_argument" = -config ]; then
+    config_argument=$argument
+    break
+  fi
+  previous_argument=$argument
+done
+
+case " $* " in
+  *' -version '*)
+    printf '%s\n' '2.1.18'
+    exit 0
+    ;;
+  *' -check '*)
+    printf 'daemon-check-config %s\n' "$config_argument" >> "$MOCK_CALL_LOG"
+    if [ "${MOCK_DAEMON_REQUIRE_CHECK_CONFIG_DIR:-0}" = 1 ]; then
+      case "$config_argument" in
+        "$MODULE_DIR/.config-check."*/dnscrypt-proxy.toml|"${DNSCRYPT_RUNTIME_ROOT:-$MODULE_DIR}/.config-check."*/dnscrypt-proxy.toml) ;;
+        *) exit 1 ;;
+      esac
+    fi
+    case "${MOCK_DAEMON_START_MODE:-success}" in
+      config_error)
+        printf '%s\n' 'Unsupported key in configuration file: [invalid_mock_key]' >&2
+        exit 1
+        ;;
+      missing_cache_key)
+        printf '%s\n' 'Missing cache file for source [public-resolvers]' >&2
+        exit 1
+        ;;
+      source_cache_error)
+        printf '%s\n' 'Unable to retrieve source [public-resolvers]: [network is unreachable]' >&2
+        exit 1
+        ;;
+      check_timeout)
+        mkdir -p "$DNSCRYPT_PROC_ROOT/$$"
+        printf '%s\0%s\0%s\0%s\0%s\0' "$0" '-check' '-config' "$config_argument" '-child' \
+          > "$DNSCRYPT_PROC_ROOT/$$/cmdline"
+        printf 'Uid:\t3003\t3003\t3003\t3003\n' > "$DNSCRYPT_PROC_ROOT/$$/status"
+        exec "$MOCK_HOST_SLEEP" 300
+        ;;
+      check_shutdown)
+        mkdir -p "$DNSCRYPT_PROC_ROOT/$$"
+        printf '%s\0%s\0%s\0%s\0%s\0' "$0" '-check' '-config' "$config_argument" '-child' \
+          > "$DNSCRYPT_PROC_ROOT/$$/cmdline"
+        printf 'Uid:\t3003\t3003\t3003\t3003\n' > "$DNSCRYPT_PROC_ROOT/$$/status"
+        : > "$MODULE_DIR/state/shutdown-requested"
+        exec "$MOCK_HOST_SLEEP" 300
+        ;;
+      check_pid_reuse)
+        mkdir -p "$DNSCRYPT_PROC_ROOT/$$"
+        printf '%s\0%s\0%s\0%s\0%s\0' "$0" '-check' '-config' "$config_argument" '-child' \
+          > "$DNSCRYPT_PROC_ROOT/$$/cmdline"
+        printf 'Uid:\t3003\t3003\t3003\t3003\n' > "$DNSCRYPT_PROC_ROOT/$$/status"
+        exec "$MOCK_HOST_SLEEP" 300
+        ;;
+    esac
+    if [ -n "${MOCK_DAEMON_REPLACE_CHECK_STAGE_TARGET:-}" ]; then
+      for mock_original_stage in \
+        "$MODULE_DIR/config/.dnscrypt-proxy.toml.quick-stage."*
+      do
+        [ -f "$mock_original_stage" ] || continue
+        rm -f "$mock_original_stage"
+        ln -s "$MOCK_DAEMON_REPLACE_CHECK_STAGE_TARGET" "$mock_original_stage" || exit 1
+      done
+    fi
+    exit 0
+    ;;
+  *' -resolve '*)
+    printf 'daemon-resolve-config %s\n' "$config_argument" >> "$MOCK_CALL_LOG"
+    if [ "${MOCK_DAEMON_REQUIRE_CHECK_CONFIG_DIR:-0}" = 1 ]; then
+      case "$config_argument" in
+        "$MODULE_DIR/.config-check."*/dnscrypt-proxy.toml|"${DNSCRYPT_RUNTIME_ROOT:-$MODULE_DIR}/.config-check."*/dnscrypt-proxy.toml) ;;
+        *) exit 1 ;;
+      esac
+    fi
+    if [ "${MOCK_DAEMON_REQUIRE_SU:-0}" = 1 ] \
+      && [ "${MOCK_DNSCRYPT_SU_ACTIVE:-0}" != 1 ]; then
+      exit 1
+    fi
+    case "${MOCK_DAEMON_PROBE_MODE:-success}" in
+      success)
+        printf '%s\n' \
+          'Resolver      : 1.1.1.1' \
+          'Canonical name: dns.google.' \
+          'IPv4 addresses: 8.8.8.8, 8.8.4.4'
+        exit 0
+        ;;
+      incomplete)
+        printf '%s\n' \
+          'Resolver      : 1.1.1.1' \
+          'Canonical name: dns.google.' \
+          'IPv4 addresses: '
+        exit 0
+        ;;
+      exit_nonzero)
+        printf '%s\n' 'Unable to resolve: [network unreachable]'
+        exit 1
+        ;;
+      timeout)
+        exit 124
+        ;;
+      *) exit 64 ;;
+    esac
+    ;;
+esac
+
+printf 'daemon-start %s\n' "$config_argument" >> "$MOCK_CALL_LOG"
+case "${MOCK_DAEMON_START_MODE:-success}" in
+  config_error|missing_cache_key|source_cache_error|check_timeout|check_shutdown|check_pid_reuse) exit 70 ;;
+  exit)
+    exit 1
+    ;;
+  success|no_listener|no_listener_shutdown) ;;
+  *) exit 64 ;;
+esac
+
+if [ "${MOCK_DAEMON_REJECT_FAMILY_ON_START:-0}" = 1 ] \
+  && grep -q 'cloudflare-family' "$runtime_config" 2>/dev/null; then
+  exit 1
+fi
+
+proc_dir="$DNSCRYPT_PROC_ROOT/$$"
+mkdir -p "$proc_dir/fd" "$DNSCRYPT_PROC_ROOT/net"
+printf '%s\0%s\0%s\0' "$0" '-config' "$config_argument" \
+  > "$proc_dir/cmdline"
+printf 'Uid:\t3003\t3003\t3003\t3003\n' > "$proc_dir/status"
+case "${MOCK_DAEMON_START_MODE:-success}" in
+  no_listener) exec "$MOCK_HOST_SLEEP" 300 ;;
+  no_listener_shutdown)
+    : > "$MODULE_DIR/state/shutdown-requested"
+    exec "$MOCK_HOST_SLEEP" 300
+    ;;
+esac
+printf 'socket:[311]\n' > "$proc_dir/fd/3"
+printf 'socket:[322]\n' > "$proc_dir/fd/4"
+printf '%s\n' \
+  '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode' \
+  '   0: 0100007F:14EA 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 311 1' \
+  > "$DNSCRYPT_PROC_ROOT/net/tcp"
+printf '%s\n' \
+  '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode' \
+  '   0: 0100007F:14EA 00000000:0000 07 00000000:00000000 00:00000000 00000000 0 0 322 1' \
+  > "$DNSCRYPT_PROC_ROOT/net/udp"
+exec "$MOCK_HOST_SLEEP" 300

@@ -36,6 +36,29 @@ case "$subcommand" in
     fi
     exit 0
     ;;
+  timeout)
+    [ "$#" -ge 2 ] || exit 64
+    shift
+    exec "$@"
+    ;;
+  nc)
+    # Model the local, upstream-independent Firefox canary response expected by
+    # dnscrypt_local_handler_ready: TCP length, matching ID, QR+NXDOMAIN flags,
+    # one question, and the original use-application-dns.net A question.
+    case "${MOCK_LOCAL_HANDLER_MODE:-success}" in
+      success)
+        printf '\000\051\104\120\201\203\000\001\000\000\000\000\000\000\023use-application-dns\003net\000\000\001\000\001'
+        exit 0
+        ;;
+      empty_success) exit 0 ;;
+      wrong_response)
+        printf '\000\051\104\121\201\203\000\001\000\000\000\000\000\000\023use-application-dns\003net\000\000\001\000\001'
+        exit 0
+        ;;
+      wedged) exit 124 ;;
+      *) exit 1 ;;
+    esac
+    ;;
   *)
     exit 127
     ;;

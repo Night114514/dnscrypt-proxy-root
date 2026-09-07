@@ -55,8 +55,9 @@ start_watchdog() {
   return 0
 }
 
-# start_service saves/disables Android Private DNS, waits for a real encrypted
-# resolution, and installs firewall rules only after the proxy is ready.
+# start_service keeps system DNS fail-open during the bounded NetProbe window,
+# then applies the selected integration policy only after both local listeners
+# and the dedicated runtime UID are verified.
 if ! sh "$MODDIR/scripts/dnscrypt-control.sh" start >/dev/null 2>&1; then
   log_msg "$SERVICE_LOG" "Boot-time dnscrypt-proxy start failed."
 fi
@@ -67,8 +68,10 @@ fi
 # Check the upstream binary only after the initial start. This avoids racing
 # ensure_binary during first installation; a successful updater restarts the
 # already-running daemon transactionally.
-if ! shutdown_requested; then
+if ! shutdown_requested && runtime_config_inputs_are_trusted; then
   (
     sh "$MODDIR/scripts/dnscrypt-control.sh" auto-update >/dev/null 2>&1 || true
   ) 7>&- &
+elif ! shutdown_requested; then
+  log_msg "$SERVICE_LOG" "Skipped automatic update because active configuration inputs are unsafe."
 fi

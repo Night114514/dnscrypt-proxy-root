@@ -62,11 +62,21 @@ jobs:
             tests/mocks/busybox-ash-prelude \
             tests/mocks/date \
             tests/mocks/dnscrypt-control-busybox \
+            tests/mocks/dnscrypt-control-chmod \
+            tests/mocks/dnscrypt-control-chown \
+            tests/mocks/dnscrypt-control-daemon \
             tests/mocks/dnscrypt-control-firewall \
             tests/mocks/dnscrypt-control-nslookup \
+            tests/mocks/dnscrypt-control-readlink \
+            tests/mocks/dnscrypt-control-settings \
+            tests/mocks/dnscrypt-control-stat \
+            tests/mocks/dnscrypt-control-su \
+            tests/mocks/dnscrypt-control-sysctl \
             tests/mocks/dnscrypt-control-updater \
             tests/mocks/download \
             tests/mocks/getprop \
+            tests/mocks/kill \
+            tests/mocks/mktemp \
             tests/mocks/mv \
             tests/mocks/notify \
             tests/mocks/sha256sum \

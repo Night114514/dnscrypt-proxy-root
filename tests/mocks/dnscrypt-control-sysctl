@@ -1,0 +1,13 @@
+#!/bin/sh
+set -u
+
+printf 'sysctl %s\n' "$*" >> "$MOCK_CALL_LOG"
+case "${1:-} ${2:-}" in
+  '-w net.ipv4.conf.all.route_localnet='*)
+    value=${2##*=}
+    printf '%s\n' "$value" > "$DNSCRYPT_PROC_SYS_ROOT/net/ipv4/conf/all/route_localnet"
+    ;;
+  *)
+    exit 64
+    ;;
+esac

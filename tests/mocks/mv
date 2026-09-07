@@ -2,13 +2,51 @@
 set -u
 
 last_argument=
+previous_argument=
 for argument in "$@"; do
+  previous_argument=$last_argument
   last_argument=$argument
 done
 
-if [ "$MOCK_MV_MODE" = fail ] && [ "$last_argument" = "$MOCK_INSTALL_TARGET" ]; then
-  printf 'mv-fail %s\n' "$*" >> "$MOCK_CALL_LOG"
-  exit 1
+if [ "$last_argument" = "$MOCK_INSTALL_TARGET" ]; then
+  if [ "$MOCK_MV_MODE" = fail ]; then
+    printf 'mv-fail %s\n' "$*" >> "$MOCK_CALL_LOG"
+    exit 1
+  fi
+  if [ "$MOCK_MV_MODE" = fail_nth ]; then
+    match_count=0
+    [ ! -s "$MOCK_MV_MATCH_COUNT_FILE" ] || match_count=$(cat "$MOCK_MV_MATCH_COUNT_FILE")
+    match_count=$((match_count + 1))
+    printf '%s\n' "$match_count" > "$MOCK_MV_MATCH_COUNT_FILE"
+    if [ "$match_count" -eq "$MOCK_MV_FAIL_MATCH_COUNT" ]; then
+      printf 'mv-fail-nth %s\n' "$*" >> "$MOCK_CALL_LOG"
+      exit 1
+    fi
+  fi
 fi
 
-exec "$MOCK_REAL_MV" "$@"
+"$MOCK_REAL_MV" "$@" || exit $?
+if [ -n "${MOCK_CHOWN_STATE:-}" ] && [ -n "$previous_argument" ]; then
+  moved_state="$MOCK_CHOWN_STATE.mv.$$"
+  awk -F '|' -v source="$previous_argument" -v target="$last_argument" '
+    $2 == source { print $1 "|" target; next }
+    index($2, source "/") == 1 {
+      print $1 "|" target substr($2, length(source) + 1)
+      next
+    }
+    { print }
+  ' "$MOCK_CHOWN_STATE" > "$moved_state" 2>/dev/null || exit 1
+  "$MOCK_REAL_MV" -f "$moved_state" "$MOCK_CHOWN_STATE" || exit 1
+fi
+if [ -n "${MOCK_CHMOD_STATE:-}" ] && [ -n "$previous_argument" ]; then
+  moved_state="$MOCK_CHMOD_STATE.mv.$$"
+  awk -F '|' -v source="$previous_argument" -v target="$last_argument" '
+    $2 == source { print $1 "|" target; next }
+    index($2, source "/") == 1 {
+      print $1 "|" target substr($2, length(source) + 1)
+      next
+    }
+    { print }
+  ' "$MOCK_CHMOD_STATE" > "$moved_state" 2>/dev/null || exit 1
+  "$MOCK_REAL_MV" -f "$moved_state" "$MOCK_CHMOD_STATE" || exit 1
+fi

@@ -9,6 +9,8 @@ const vm = require('node:vm');
 const rootDir = path.resolve(__dirname, '..');
 const bundlePath = path.join(rootDir, 'webroot', 'assets', 'index-CD85Tj2j.js');
 const bundle = fs.readFileSync(bundlePath, 'utf8');
+const leakAddonPath = path.join(rootDir, 'webroot', 'addons', 'leak-test.js');
+const leakAddon = fs.readFileSync(leakAddonPath, 'utf8');
 const bridgeStart = bundle.indexOf('function It(){');
 const bridgeEnd = bundle.indexOf('function Rg(', bridgeStart);
 
@@ -85,4 +87,11 @@ assert.match(saveListSource, /save-list-b64/,
 assert.doesNotMatch(saveListSource, /base64\s+-d\s*>/,
   'WebUI list save writes decoded data directly to a live file');
 
-console.log('WebUI bridge tests passed (8 runtime cases plus static list-save invariants).');
+assert.match(leakAddon, /不涵蓋 App 自有 DoH／DoT 或所有 DNS 路徑/,
+  'leak-test UI does not disclose the limits of its sampled log check');
+assert.match(leakAddon, /not_applicable:[^\n]+upstream_only 模式不執行全域 DNS 攔截/,
+  'leak-test UI does not explain why the sample is inapplicable in upstream_only mode');
+assert.doesNotMatch(leakAddon, /DNS 流量已受保護|DNS 流量正在洩漏|完全在本機執行/,
+  'leak-test UI overclaims a global privacy or routing verdict');
+
+console.log('WebUI bridge tests passed (8 runtime cases plus static list-save/leak-scope invariants).');

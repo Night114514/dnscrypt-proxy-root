@@ -22,9 +22,27 @@ case "$MOCK_UNZIP_MODE" in
     printf '%s\n' \
       '#!/bin/sh' \
       '# mock dnscrypt binary' \
+      'printf "candidate %s\n" "$*" >> "$MOCK_CALL_LOG"' \
+      'printf "candidate-exec %s %s\n" "$0" "$*" >> "$MOCK_CALL_LOG"' \
       'case "${1:-}" in' \
       '  -version) printf "%s\\n" "${MOCK_BINARY_VERSION:-$MOCK_LATEST_VERSION}" ;;' \
-      '  -check) [ "${MOCK_BINARY_MODE:-success}" != "config-fail" ] ;;' \
+      '  -check)' \
+      '    if [ "${MOCK_CANDIDATE_REQUIRE_RUNTIME_ROOT:-0}" = 1 ]; then' \
+      '      case "$0" in "$DNSCRYPT_RUNTIME_ROOT/bin/.dnscrypt-proxy-candidate."*) ;; *) exit 86 ;; esac' \
+      '      case "$3" in "$DNSCRYPT_RUNTIME_ROOT"/.config-check.*/dnscrypt-proxy.toml) ;; *) exit 87 ;; esac' \
+      '    fi' \
+      '    case "${MOCK_BINARY_MODE:-success}" in' \
+      '      config-fail) exit 1 ;;' \
+      '      check-timeout|check-shutdown)' \
+      '        mkdir -p "$DNSCRYPT_PROC_ROOT/$$"' \
+      '        printf "%s\\0%s\\0%s\\0%s\\0%s\\0" "$0" -check -config "$3" -child > "$DNSCRYPT_PROC_ROOT/$$/cmdline"' \
+      '        printf "Uid:\t3003\t3003\t3003\t3003\n" > "$DNSCRYPT_PROC_ROOT/$$/status"' \
+      '        [ "${MOCK_BINARY_MODE:-success}" != check-shutdown ] || : > "$MODULE_DIR/state/shutdown-requested"' \
+      '        exec "$MOCK_HOST_SLEEP" 300' \
+      '        ;;' \
+      '      *) exit 0 ;;' \
+      '    esac' \
+      '    ;;' \
       '  *) exit 64 ;;' \
       'esac' > "$destination/$MOCK_INNER_DIR/dnscrypt-proxy"
     ;;

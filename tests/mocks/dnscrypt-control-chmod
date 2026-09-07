@@ -1,0 +1,20 @@
+#!/bin/sh
+set -u
+
+printf 'chmod %s\n' "$*" >> "$MOCK_CALL_LOG"
+mock_chmod_mode=$1
+shift
+"$MOCK_HOST_CHMOD" "$mock_chmod_mode" "$@" || exit $?
+mock_chmod_record_mode=$mock_chmod_mode
+while [ "${#mock_chmod_record_mode}" -gt 1 ] \
+  && [ "${mock_chmod_record_mode#0}" != "$mock_chmod_record_mode" ]; do
+  mock_chmod_record_mode=${mock_chmod_record_mode#0}
+done
+for mock_chmod_path in "$@"; do
+  printf '%s|%s\n' "$mock_chmod_record_mode" "$mock_chmod_path" >> "$MOCK_CHMOD_STATE"
+  if [ -n "${MOCK_CHMOD_SHUTDOWN_PATH:-}" ] \
+    && [ "$mock_chmod_path" = "$MOCK_CHMOD_SHUTDOWN_PATH" ] \
+    && [ "$mock_chmod_record_mode" = 755 ]; then
+    : > "$MODULE_DIR/state/shutdown-requested"
+  fi
+done

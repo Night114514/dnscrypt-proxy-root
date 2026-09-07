@@ -1,0 +1,32 @@
+#!/bin/sh
+set -u
+
+printf 'settings %s\n' "$*" >> "$MOCK_CALL_LOG"
+
+case "${1:-} ${2:-} ${3:-}" in
+  'get global private_dns_mode')
+    if [ -f "$MOCK_PRIVATE_DNS_MODE_FILE" ]; then cat "$MOCK_PRIVATE_DNS_MODE_FILE"; else printf '%s\n' "${MOCK_PRIVATE_DNS_MODE:-opportunistic}"; fi
+    ;;
+  'get global private_dns_specifier')
+    if [ -f "$MOCK_PRIVATE_DNS_SPECIFIER_FILE" ]; then cat "$MOCK_PRIVATE_DNS_SPECIFIER_FILE"; else printf '%s\n' "${MOCK_PRIVATE_DNS_SPECIFIER:-null}"; fi
+    ;;
+  'put global private_dns_mode')
+    [ "${MOCK_SETTINGS_FAIL_MODE_PUT:-0}" != 1 ] || exit 1
+    [ -z "${MOCK_SETTINGS_FAIL_MODE_PUT_VALUE:-}" ] \
+      || [ "${4:-}" != "$MOCK_SETTINGS_FAIL_MODE_PUT_VALUE" ] \
+      || exit 1
+    printf '%s\n' "${4:-}" > "$MOCK_PRIVATE_DNS_MODE_FILE"
+    ;;
+  'put global private_dns_specifier')
+    printf '%s\n' "${4:-}" > "$MOCK_PRIVATE_DNS_SPECIFIER_FILE"
+    ;;
+  'delete global private_dns_mode')
+    printf '%s\n' null > "$MOCK_PRIVATE_DNS_MODE_FILE"
+    ;;
+  'delete global private_dns_specifier')
+    printf '%s\n' null > "$MOCK_PRIVATE_DNS_SPECIFIER_FILE"
+    ;;
+  *)
+    exit 64
+    ;;
+esac

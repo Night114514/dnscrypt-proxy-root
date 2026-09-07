@@ -1,0 +1,22 @@
+#!/bin/sh
+set -u
+
+printf 'chown %s\n' "$*" >> "$MOCK_CALL_LOG"
+[ "$#" -ge 2 ] || exit 64
+mock_chown_owner=$1
+shift
+case "$mock_chown_owner" in
+  0:0|0.0|0:3003|0.3003|3003:0|3003.0|3003:3003|3003.3003) ;;
+  *) exit 64 ;;
+esac
+for mock_chown_path in "$@"; do
+  [ -e "$mock_chown_path" ] || [ -L "$mock_chown_path" ] || exit 64
+  case "$mock_chown_path" in
+    "$MOCK_RUNTIME_SOURCE_ROOT/state"|"$MOCK_RUNTIME_SOURCE_ROOT/state/"*|\
+    "$MOCK_RUNTIME_ROOT"|"$MOCK_RUNTIME_ROOT/"*|\
+    "$MOCK_RUNTIME_ROOT.creating"|"$MOCK_RUNTIME_ROOT.creating/"*|\
+    "$MOCK_RUNTIME_ROOT.removing"|"$MOCK_RUNTIME_ROOT.removing/"*) ;;
+    *) exit 64 ;;
+  esac
+  printf '%s|%s\n' "$mock_chown_owner" "$mock_chown_path" >> "$MOCK_CHOWN_STATE"
+done

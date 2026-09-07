@@ -1,0 +1,13 @@
+#!/bin/sh
+set -u
+
+target=${1:-}
+case "$target" in
+  "$DNSCRYPT_PROC_ROOT"/[0-9]*/fd/[0-9]*)
+    [ -f "$target" ] || exit 1
+    cat "$target"
+    ;;
+  *)
+    exec "$MOCK_HOST_READLINK" "$@"
+    ;;
+esac

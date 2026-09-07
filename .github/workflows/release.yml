@@ -114,6 +114,46 @@ jobs:
             update.json
 
           unzip -t "$ZIP_NAME"
+          ARCHIVE_ROOT=$(mktemp -d)
+          trap 'rm -rf "$ARCHIVE_ROOT"' EXIT
+          unzip -q "$ZIP_NAME" -d "$ARCHIVE_ROOT"
+          for EXECUTABLE in \
+            META-INF/com/google/android/update-binary \
+            scripts/common.sh \
+            scripts/dnscrypt-control.sh \
+            scripts/update-dnscrypt.sh \
+            scripts/watchdog.sh \
+            action.sh \
+            customize.sh \
+            post-fs-data.sh \
+            service.sh \
+            uninstall.sh
+          do
+            [ "$(stat -c '%a' "$ARCHIVE_ROOT/$EXECUTABLE")" = 755 ] || {
+              echo "Release executable has the wrong mode: $EXECUTABLE" >&2
+              exit 1
+            }
+          done
+          for DATA_FILE in \
+            META-INF/com/google/android/updater-script \
+            config/dnscrypt-proxy.toml \
+            webroot/addons/addons.css \
+            webroot/addons/leak-test.js \
+            webroot/addons/theme.css \
+            webroot/addons/theme.js \
+            webroot/assets/index-BRNBHrsZ.css \
+            webroot/assets/index-CD85Tj2j.js \
+            webroot/icon.svg \
+            webroot/index.html \
+            module.prop \
+            skip_mount \
+            update.json
+          do
+            [ "$(stat -c '%a' "$ARCHIVE_ROOT/$DATA_FILE")" = 644 ] || {
+              echo "Release data file has the wrong mode: $DATA_FILE" >&2
+              exit 1
+            }
+          done
           if unzip -Z1 "$ZIP_NAME" | grep -Eq '(^|/)(\.git|\.github|tests|bin|run|logs|tmp)(/|$)|(^|/)README[^/]*$|(^|/)\.gitattributes$'; then
             echo 'Release ZIP contains a development-only path.' >&2
             exit 1
@@ -149,6 +189,8 @@ jobs:
 
             - Module version: `${{ steps.version.outputs.tag }}`
             - Upstream dnscrypt-proxy: `${{ steps.version.outputs.upstream }}`
+
+            > **Important upgrade warning:** Before installing directly over v0.9.0 or older, export or record configuration, lists, and subscriptions. The installer resets these inputs to audited defaults; reboot, then re-apply them. Direct upgrades from v0.6.0 through v0.8.0 must reboot to clear indistinguishable legacy per-boot IPv6 rules safely.
 
             The matching dnscrypt-proxy binary is downloaded during installation or on the next update check; it is not bundled in the module ZIP.
 

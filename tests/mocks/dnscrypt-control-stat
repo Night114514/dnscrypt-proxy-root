@@ -1,0 +1,105 @@
+#!/bin/sh
+set -u
+
+mock_state_value() {
+  mock_state_file=$1
+  mock_state_path=$2
+  [ -s "$mock_state_file" ] || return 1
+  mock_state_result=$(awk -F '|' -v target="$mock_state_path" \
+    '$2 == target { value=$1 } END { print value }' "$mock_state_file" 2>/dev/null)
+  [ -n "$mock_state_result" ] || return 1
+  printf '%s\n' "$mock_state_result"
+}
+
+mock_runtime_identity() {
+  mock_identity_path=$1
+  case "$mock_identity_path" in
+    "$MOCK_RUNTIME_SOURCE_ROOT/config")
+      printf '%s\n' '0:0'
+      ;;
+    "$MOCK_RUNTIME_SOURCE_ROOT/config/"*)
+      mock_state_value "$MOCK_CHOWN_STATE" "$mock_identity_path" \
+        || printf '%s\n' '0:0'
+      ;;
+    "$MOCK_RUNTIME_SOURCE_ROOT"|"$MOCK_RUNTIME_SOURCE_ROOT/bin"|\
+    "$MOCK_RUNTIME_SOURCE_ROOT/bin/"*|"$MOCK_RUNTIME_SOURCE_ROOT/state"|\
+    "$MOCK_RUNTIME_SOURCE_ROOT/state/"*)
+      printf '%s\n' '0:0'
+      ;;
+    "$MOCK_RUNTIME_SOURCE_ROOT/run"|"$MOCK_RUNTIME_SOURCE_ROOT/run/"*|\
+    "$MOCK_RUNTIME_SOURCE_ROOT/logs"|"$MOCK_RUNTIME_SOURCE_ROOT/logs/"*|\
+    "$MOCK_RUNTIME_SOURCE_ROOT/tmp"|"$MOCK_RUNTIME_SOURCE_ROOT/tmp/"*)
+      printf '%s\n' '0:0'
+      ;;
+    "$MOCK_RUNTIME_PARENT")
+      printf '%s:%s\n' "${MOCK_RUNTIME_PARENT_UID:-0}" "${MOCK_RUNTIME_PARENT_GID:-0}"
+      ;;
+    "$MOCK_RUNTIME_ROOT"|"$MOCK_RUNTIME_ROOT/"*|\
+    "$MOCK_RUNTIME_ROOT.creating"|"$MOCK_RUNTIME_ROOT.creating/"*|\
+    "$MOCK_RUNTIME_ROOT.removing"|"$MOCK_RUNTIME_ROOT.removing/"*)
+      mock_state_value "$MOCK_CHOWN_STATE" "$mock_identity_path" || printf '%s\n' '999:999'
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+mock_runtime_mode() {
+  mock_mode_path=$1
+  case "$mock_mode_path" in
+    "$MOCK_RUNTIME_SOURCE_ROOT") printf '%s\n' 755 ;;
+    "$MOCK_RUNTIME_SOURCE_ROOT/state") printf '%s\n' 700 ;;
+    "$MOCK_RUNTIME_SOURCE_ROOT/state/"*)
+      mock_state_value "$MOCK_CHMOD_STATE" "$mock_mode_path" \
+        || "$MOCK_HOST_STAT" -c %a "$mock_mode_path" 2>/dev/null
+      ;;
+    "$MOCK_RUNTIME_SOURCE_ROOT/config") printf '%s\n' 700 ;;
+    "$MOCK_RUNTIME_SOURCE_ROOT/config/"*)
+      mock_state_value "$MOCK_CHMOD_STATE" "$mock_mode_path" \
+        || printf '%s\n' 600
+      ;;
+    "$MOCK_RUNTIME_SOURCE_ROOT/bin"|"$MOCK_RUNTIME_SOURCE_ROOT/bin/"*) printf '%s\n' 755 ;;
+    "$MOCK_RUNTIME_PARENT") printf '%s\n' "${MOCK_RUNTIME_PARENT_MODE:-755}" ;;
+    "$MOCK_RUNTIME_ROOT"|"$MOCK_RUNTIME_ROOT/"*|\
+    "$MOCK_RUNTIME_ROOT.creating"|"$MOCK_RUNTIME_ROOT.creating/"*|\
+    "$MOCK_RUNTIME_ROOT.removing"|"$MOCK_RUNTIME_ROOT.removing/"*)
+      mock_state_value "$MOCK_CHMOD_STATE" "$mock_mode_path" \
+        || "$MOCK_HOST_STAT" -c %a "$mock_mode_path" 2>/dev/null
+      ;;
+    *) "$MOCK_HOST_STAT" -c %a "$mock_mode_path" 2>/dev/null ;;
+  esac
+}
+
+if [ -n "${MOCK_STAT_UNTRUSTED_PATH:-}" ] \
+  && [ "$#" -eq 3 ] \
+  && [ "$1" = -c ] \
+  && [ "$3" = "$MOCK_STAT_UNTRUSTED_PATH" ]; then
+  mock_untrusted_uid=${MOCK_STAT_UNTRUSTED_UID:-3003}
+  case "$2" in
+    %u) printf '%s\n' "$mock_untrusted_uid"; exit 0 ;;
+    %u:%g:%a)
+      mock_untrusted_identity=$(mock_runtime_identity "$3" 2>/dev/null || true)
+      mock_untrusted_gid=${mock_untrusted_identity#*:}
+      mock_untrusted_mode=$(mock_runtime_mode "$3") || exit 1
+      printf '%s:%s:%s\n' "$mock_untrusted_uid" "$mock_untrusted_gid" "$mock_untrusted_mode"
+      exit 0
+      ;;
+  esac
+fi
+
+if [ "$#" -eq 3 ] && [ "$1" = -c ]; then
+  mock_identity=$(mock_runtime_identity "$3" 2>/dev/null || true)
+  if [ -n "$mock_identity" ]; then
+    mock_uid=${mock_identity%%:*}
+    mock_gid=${mock_identity#*:}
+    mock_mode=$(mock_runtime_mode "$3") || exit 1
+    case "$2" in
+      %u) printf '%s\n' "$mock_uid"; exit 0 ;;
+      %g) printf '%s\n' "$mock_gid"; exit 0 ;;
+      %a) printf '%s\n' "$mock_mode"; exit 0 ;;
+      %u:%g) printf '%s:%s\n' "$mock_uid" "$mock_gid"; exit 0 ;;
+      %u:%g:%a) printf '%s:%s:%s\n' "$mock_uid" "$mock_gid" "$mock_mode"; exit 0 ;;
+    esac
+  fi
+fi
+
+exec "$MOCK_HOST_STAT" "$@"

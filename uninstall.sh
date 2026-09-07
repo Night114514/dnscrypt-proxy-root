@@ -31,6 +31,11 @@ if [ "$STOP_STATUS" -ne 0 ]; then
   sh "$MODDIR/scripts/dnscrypt-control.sh" shutdown-stop >/dev/null 2>&1
   STOP_STATUS=$?
 fi
+if [ "$STOP_STATUS" -eq 0 ] && ! remove_runtime_tree; then
+  STOP_STATUS=1
+  log_msg "$SERVICE_LOG" \
+    "The verified persistent runtime tree could not be removed safely; it was preserved for manual inspection."
+fi
 if [ "$STOP_STATUS" -eq 0 ]; then
   rm -rf "$MODDIR/tmp" "$MODDIR/run"
 else
@@ -42,7 +47,8 @@ else
 fi
 
 # Proactively wipe DNS query logs (privacy-sensitive) in case the manager leaves
-# the module directory or config dir behind after uninstall.
+# the module directory behind after uninstall. The canonical runtime copy was
+# removed above only after its layout marker and ownership boundary were proven.
 rm -f "$MODDIR/config/query.log" "$MODDIR/config/nx.log" \
       "$MODDIR/config/blocked-names.log" "$MODDIR/config/blocked-ips.log" \
       "$MODDIR/config/dnscrypt-proxy.log" \
