@@ -14,9 +14,11 @@
 command() {
   [ "${1:-}" = "-v" ] && [ "$#" -eq 2 ] || return 127
   case "$2" in
-    busybox) [ -x "$MOCK_COMMAND_DIR/busybox-mock" ] ;;
-    *) [ -x "$MOCK_COMMAND_DIR/$2" ] ;;
+    busybox) command_path="$MOCK_COMMAND_DIR/busybox-mock" ;;
+    *) command_path="$MOCK_COMMAND_DIR/$2" ;;
   esac
+  [ -x "$command_path" ] || return 127
+  printf '%s\n' "$command_path"
 }
 
 if [ -x "$MOCK_COMMAND_DIR/awk" ]; then
@@ -108,7 +110,10 @@ if [ -x "$MOCK_COMMAND_DIR/cmd" ]; then
   cmd() { "$MOCK_COMMAND_DIR/cmd" "$@"; }
 fi
 if [ -x "$MOCK_COMMAND_DIR/su" ]; then
-  su() { "$MOCK_COMMAND_DIR/su" "$@"; }
+  # Keep su as an external command. BusyBox ash waits for a background shell
+  # function created inside command substitution; production launches an
+  # external root-manager su and must not inherit that test-only 300s wait.
+  alias su='"$MOCK_COMMAND_DIR/su"'
 fi
 if [ -x "$MOCK_COMMAND_DIR/nslookup" ]; then
   nslookup() { "$MOCK_COMMAND_DIR/nslookup" "$@"; }
