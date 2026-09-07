@@ -1027,6 +1027,10 @@ cleanup_config_check_snapshot() {
     return 0
   fi
   config_check_snapshot_is_owned "$_check_snapshot_dir" || return 1
+  # The disposable directory is intentionally 0500 while UID3003 consumes it.
+  # Restore owner write permission only after the exact-path/owner check so a
+  # non-root test runner can exercise the same cleanup that production root can.
+  chmod 0700 "$_check_snapshot_dir" 2>/dev/null || return 1
   rm -rf "$_check_snapshot_dir" \
     && [ ! -e "$_check_snapshot_dir" ] && [ ! -L "$_check_snapshot_dir" ]
 }
