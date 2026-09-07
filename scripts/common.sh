@@ -569,11 +569,11 @@ ensure_runtime_tree() {
     exec 6>&-
     return 1
   }
-  config_root_open_paths_are_safe "$MODULE_CONFIG_DIR/dnscrypt-proxy.toml" \
-    && config_runtime_user_is_safe "$MODULE_CONFIG_DIR/dnscrypt-proxy.toml" || {
+  if ! config_root_open_paths_are_safe "$MODULE_CONFIG_DIR/dnscrypt-proxy.toml" \
+    || ! config_runtime_user_is_safe "$MODULE_CONFIG_DIR/dnscrypt-proxy.toml"; then
     exec 6>&-
     return 1
-  }
+  fi
   write_runtime_operation create || {
     exec 6>&-
     return 1
@@ -597,8 +597,9 @@ ensure_runtime_tree() {
     || ! chmod 0700 "$_runtime_stage_config" \
     || ! chmod 0700 "$_runtime_stage_active" \
     || ! chmod 0700 "$_runtime_stage_data"; then
-    cleanup_runtime_create_path >/dev/null 2>&1 \
-      && clear_runtime_operation >/dev/null 2>&1 || true
+    if cleanup_runtime_create_path >/dev/null 2>&1; then
+      clear_runtime_operation >/dev/null 2>&1 || true
+    fi
     exec 6>&-
     return 1
   fi
@@ -609,8 +610,9 @@ ensure_runtime_tree() {
     if ! copy_runtime_template \
         "$MODULE_CONFIG_DIR/$_runtime_template_name" \
         "$_runtime_stage_config/$_runtime_template_name" 0600 0:0; then
-      cleanup_runtime_create_path >/dev/null 2>&1 \
-        && clear_runtime_operation >/dev/null 2>&1 || true
+      if cleanup_runtime_create_path >/dev/null 2>&1; then
+        clear_runtime_operation >/dev/null 2>&1 || true
+      fi
       exec 6>&-
       return 1
     fi
@@ -628,8 +630,9 @@ ensure_runtime_tree() {
         && _runtime_active_copy_ok=1
     fi
     if [ "$_runtime_active_copy_ok" -ne 1 ]; then
-      cleanup_runtime_create_path >/dev/null 2>&1 \
-        && clear_runtime_operation >/dev/null 2>&1 || true
+      if cleanup_runtime_create_path >/dev/null 2>&1; then
+        clear_runtime_operation >/dev/null 2>&1 || true
+      fi
       exec 6>&-
       return 1
     fi
@@ -639,8 +642,9 @@ ensure_runtime_tree() {
     if ! copy_runtime_template \
         "$_runtime_template_subscriptions" "$_runtime_stage_config/subscriptions.json" \
         0600 0:0; then
-      cleanup_runtime_create_path >/dev/null 2>&1 \
-        && clear_runtime_operation >/dev/null 2>&1 || true
+      if cleanup_runtime_create_path >/dev/null 2>&1; then
+        clear_runtime_operation >/dev/null 2>&1 || true
+      fi
       exec 6>&-
       return 1
     fi
@@ -648,8 +652,9 @@ ensure_runtime_tree() {
   if [ -f "$MODULE_BIN_DIR/dnscrypt-proxy" ] && [ ! -L "$MODULE_BIN_DIR/dnscrypt-proxy" ]; then
     if ! copy_runtime_template \
         "$MODULE_BIN_DIR/dnscrypt-proxy" "$_runtime_stage_binary" 0755 0:0; then
-      cleanup_runtime_create_path >/dev/null 2>&1 \
-        && clear_runtime_operation >/dev/null 2>&1 || true
+      if cleanup_runtime_create_path >/dev/null 2>&1; then
+        clear_runtime_operation >/dev/null 2>&1 || true
+      fi
       exec 6>&-
       return 1
     fi
@@ -670,8 +675,9 @@ ensure_runtime_tree() {
     || ! runtime_tree_is_trusted \
     || ! clear_runtime_operation; then
     if [ ! -e "$RUNTIME_ROOT" ] && [ ! -L "$RUNTIME_ROOT" ]; then
-      cleanup_runtime_create_path >/dev/null 2>&1 \
-        && clear_runtime_operation >/dev/null 2>&1 || true
+      if cleanup_runtime_create_path >/dev/null 2>&1; then
+        clear_runtime_operation >/dev/null 2>&1 || true
+      fi
     fi
     exec 6>&-
     return 1
@@ -758,12 +764,12 @@ publish_runtime_active_snapshot() {
     return 1
   fi
   if [ -e "$RUNTIME_ACTIVE_DIR" ] || [ -L "$RUNTIME_ACTIVE_DIR" ]; then
-    [ -d "$RUNTIME_ACTIVE_DIR" ] && [ ! -L "$RUNTIME_ACTIVE_DIR" ] \
-      && rm -rf "$RUNTIME_ACTIVE_DIR" || {
-        cleanup_runtime_active_stage >/dev/null 2>&1 || true
-        exec 6>&-
-        return 1
-      }
+    if [ ! -d "$RUNTIME_ACTIVE_DIR" ] || [ -L "$RUNTIME_ACTIVE_DIR" ] \
+      || ! rm -rf "$RUNTIME_ACTIVE_DIR"; then
+      cleanup_runtime_active_stage >/dev/null 2>&1 || true
+      exec 6>&-
+      return 1
+    fi
   fi
   if mv "$RUNTIME_ACTIVE_STAGE" "$RUNTIME_ACTIVE_DIR" \
     && runtime_active_snapshot_at_is_trusted "$RUNTIME_ACTIVE_DIR"; then
@@ -1042,12 +1048,12 @@ prepare_config_check_snapshot() {
   config_root_open_paths_are_safe "$_check_source_config" || return 1
   config_runtime_user_is_safe "$_check_source_config" || return 1
   cleanup_config_check_snapshot "$_check_snapshot_dir" || return 1
-  mkdir "$_check_snapshot_dir" \
-    && chown 0:0 "$_check_snapshot_dir" 2>/dev/null \
-    && chmod 0700 "$_check_snapshot_dir" || {
-      cleanup_config_check_snapshot "$_check_snapshot_dir" >/dev/null 2>&1 || true
-      return 1
-    }
+  if ! mkdir "$_check_snapshot_dir" \
+    || ! chown 0:0 "$_check_snapshot_dir" 2>/dev/null \
+    || ! chmod 0700 "$_check_snapshot_dir"; then
+    cleanup_config_check_snapshot "$_check_snapshot_dir" >/dev/null 2>&1 || true
+    return 1
+  fi
   if ! write_config_without_runtime_user \
       "$_check_source_config" "$_check_snapshot_config"; then
     cleanup_config_check_snapshot "$_check_snapshot_dir" >/dev/null 2>&1 || true

@@ -123,7 +123,9 @@ assert_file_empty() {
 }
 
 assert_not_exists() {
-  [ ! -e "$1" ] && [ ! -L "$1" ] || fail "$2"
+  if [ -e "$1" ] || [ -L "$1" ]; then
+    fail "$2"
+  fi
 }
 
 link_host_tool() {
@@ -1347,7 +1349,7 @@ test_module_binary_is_promoted_before_persistent_start_and_rolled_back() {
     > "$DNSCRYPT_RUNTIME_ROOT/bin/dnscrypt-proxy" || return 1
   chmod 0755 "$DNSCRYPT_RUNTIME_ROOT/bin/dnscrypt-proxy" || return 1
   printf '%s\n' '99.0.0' > "$MODULE_DIR/run/installed-version"
-  MOCK_DAEMON_START_MODE=exit
+  MOCK_DAEMON_START_MODE='exit'
   export MOCK_DAEMON_START_MODE
   : > "$MOCK_CALL_LOG"
 
