@@ -1112,6 +1112,14 @@ test_runtime_tree_is_copied_with_exact_layout_and_canonical_argv() {
   assert_file_not_exact_line "$MOCK_CALL_LOG" "chmod 0755 $MOCK_RUNTIME_PARENT" \
     "runtime setup changed the parent directory mode" || return 1
 
+  # This check starts an external mock through background su and waits for its
+  # completion or PID handshake. Most tests replace sleep with a no-op, but that
+  # turns the bounded startup wait into a scheduler-dependent tight loop on a
+  # loaded CI runner. Preserve the real bounded wait at this async boundary.
+  printf '#!/bin/sh\nexec "%s" "$@"\n' "$HOST_SLEEP" > "$TOOL_BIN/sleep" \
+    || return 1
+  "$HOST_CHMOD" 0755 "$TOOL_BIN/sleep" || return 1
+
   : > "$MOCK_CALL_LOG"
   output=$(run_common_probe '
     ensure_runtime_tree || exit $?
