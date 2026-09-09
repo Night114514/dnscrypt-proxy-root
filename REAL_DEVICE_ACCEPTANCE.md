@@ -1,6 +1,6 @@
-# Android real-device acceptance matrix for v0.9.1
+# Android real-device acceptance matrix for v0.9.2
 
-> Status: **NOT EXECUTED for v0.9.1** as of 2026-09-07. The repository CI uses
+> Status: **NOT EXECUTED for v0.9.2** as of 2026-09-09. The repository CI uses
 > isolated mocks and cannot validate a real Android kernel, SELinux policy, root-manager mount/lifecycle
 > behavior, Private DNS service, VPN routing, firewall counters, or DNS egress. Do not convert any row to PASS
 > without attaching the observations listed below.
@@ -96,7 +96,7 @@ or firewall counter changes on the real egress interface. A successful lookup or
 a browser leak-test page alone is not sufficient. Also record whether the tested
 application uses system Do53, built-in DoH/DoT, or a VPN-provided resolver.
 
-The normal v0.9.1 daemon identity is exactly:
+The normal v0.9.2 daemon identity is exactly:
 
 ```text
 /data/local/dnscrypt-proxy-root-runtime/bin/dnscrypt-proxy -config /data/local/dnscrypt-proxy-root-runtime/active/dnscrypt-proxy.toml
@@ -131,7 +131,7 @@ named root manager can turn that manager/device row into PASS.
 
 ## Acceptance matrix
 
-| Scenario | Mode | Required observations | v0.9.1 result |
+| Scenario | Mode | Required observations | v0.9.2 result |
 | --- | --- | --- | --- |
 | Clean boot on ordinary Wi-Fi/mobile data, repeated separately on Magisk, KernelSU, and APatch | `strict` | Installer records digest/version validation but defers `-check`; first boot creates the exact marked `/data/local` copy with the modes, owners, canonical inputs, active snapshot, data directory and SELinux evidence above. Daemon and source/cache `-check` run as UID 3003 using only the runtime binary and their disposable snapshot/cwd; root never parses those snapshots. Preflight and NetProbe remain fail-open; no module OUTPUT jump appears before both owned listeners and the bounded local synthesized NXDOMAIN response succeed; saved Private DNS changes only after readiness; ordered IPv4/IPv6 policy, ownership tokens, `route_localnet`, and Do53 counters are complete. | **NOT RUN** |
 | Installer binary download fails, then network recovers after reboot | Both, tested separately | Flashing reports the nonfatal download warning and leaves no unverified executable; first boot remains fail-open, retries the digest/version-verified download before daemon launch, then performs the deferred runtime-path `-check`. If automatic recovery still fails, action/WebUI retry succeeds after connectivity returns without unsafe config adoption or partial binary commit. | **NOT RUN** |
@@ -147,10 +147,15 @@ named root manager can turn that manager/device row into PASS.
 | Module uninstall with a valid owned runtime tree | Both, tested separately | Same cleanup as disable, including interrupted-operation retry; third-party firewall rules survive; the exact marked `/data/local/dnscrypt-proxy-root-runtime` tree is absent afterward, while unrelated `/data/local` content survives. Capture `test ! -e /data/local/dnscrypt-proxy-root-runtime; echo $?` and require `0`. | **NOT RUN** |
 | Module uninstall with an unsafe/unmarked runtime collision (disposable test state only) | Both, tested separately | Cleanup fails closed and preserves the unverified tree for manual inspection instead of recursively deleting it; firewall, Private DNS, route, and daemon cleanup results are recorded independently. | **NOT RUN** |
 | Upgrade from v0.9.0 and v0.8.0 | Both, tested separately | Installer clearly warns that older inputs ineligible under v0.9.1's exact migration-provenance policy are reset; settings were exported first and re-applied after reboot; v0.9.0 exact chains are adopted only with trusted current-boot provenance; legacy generic IPv6 direct rules are not deleted in place and disappear only after the required reboot; unrelated identical and same-name third-party rules survive. | **NOT RUN** |
+| Upgrade from a trusted v0.9.1 runtime | Both, tested separately | The canonical TOML, all four managed lists and optional subscriptions remain byte-identical after installation; active state is rebuilt only through the normal start path; v0.9.2 status reports `config_apply_state` without weakening owner/mode checks. | **NOT RUN** |
+| KernelSU and APatch WebUI bridge | Both, tested separately on each manager | The shipped callback bridge opens without synthetic data; status visibly distinguishes process, health, policy, mode, upstream and pending state; every action returns or displays the backend result; long update operations do not freeze or lose their completion callback. | **NOT RUN** |
+| Canonical managed-list save and apply | Both, tested separately | WebUI load bytes equal the matching file under runtime `config/`, not the module template. Save-only changes canonical bytes and reports `pending` while active bytes remain unchanged. Save-and-apply publishes the exact new bytes after a healthy restart; a deliberately rejected disposable generation restores the previous canonical bytes and known-working service rather than reporting success. | **NOT RUN** |
+| Generation v2 export/import | Both, tested separately | Export contains the exact fixed v2 fields and round-trips TOML, four lists and subscriptions without changing the Android integration mode. A valid import is reported pending until restart. A controlled commit interruption restores every old canonical file from the trusted generation backup on the next control invocation, with no mixed generation exposed as success. | **NOT RUN** |
+| DNS destination comparison in strict mode | `strict` | The comparison is visibly labelled `comparison_scope=policy_affected`; firewall counters or a packet trace confirm the named destination query follows current redirect policy. Neither the UI nor the report calls it a direct-policy bypass or independent destination RTT. | **NOT RUN** |
 | dnscrypt-proxy core update succeeds | Both, tested separately | Exact child/parent daemon is detected, stopped and restarted under the same selected mode; `run/installed-version` agrees with the canonical runtime binary's `-version` output, while `.layout-owner` remains the exact runtime-layout marker; listener and policy evidence is re-captured. | **NOT RUN** |
 | dnscrypt-proxy core update restart fails and rolls back | Both, tested separately | The old canonical runtime binary and `run/installed-version` marker are restored and agree, `.layout-owner` remains unchanged, the old configuration starts, selected mode remains authoritative, and any rollback failure is explicitly shown as `rollback_failed`/`policy_fault` rather than success. | **NOT RUN** |
 
-## Explicitly outside this v0.9.1 claim
+## Explicitly outside this v0.9.2 claim
 
 - Tethered-client/PREROUTING DNS capture and hotspot interface discovery.
 - Interception of application-owned DoH/DoT or guaranteed capture of every DNS path.

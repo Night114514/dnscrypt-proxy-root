@@ -948,11 +948,36 @@ runtime_config_inputs_are_trusted() {
   fi
 }
 
+# A configuration check normally consumes the canonical managed lists. During
+# an import it may instead consume the exact, private import workspace owned by
+# this control process. No arbitrary directory is accepted here.
+config_check_list_source_is_trusted() {
+  _check_list_source="$1"
+  case "$_check_list_source" in
+    "$CONFIG_DIR") ;;
+    "$RUN_DIR/import.$$")
+      [ -d "$_check_list_source" ] && [ ! -L "$_check_list_source" ] || return 1
+      _check_list_control_uid=$(config_control_uid) || return 1
+      [ "$(stat -c '%u:%g:%a' "$_check_list_source" 2>/dev/null)" = \
+        "$_check_list_control_uid:0:700" ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  _check_list_expected_identity=$(managed_config_expected_identity) || return 1
+  for _check_list_name in allowed-names.txt blocked-names.txt allowed-ips.txt blocked-ips.txt
+  do
+    [ -f "$_check_list_source/$_check_list_name" ] \
+      && [ ! -L "$_check_list_source/$_check_list_name" ] \
+      && [ "$(stat -c '%u:%g:%a' "$_check_list_source/$_check_list_name" 2>/dev/null)" = \
+        "$_check_list_expected_identity" ] || return 1
+  done
+}
+
 # The daemon and configuration checks are launched only after switching to
 # UID/GID 3003, and the root-only canonical TOML is copied to a disposable
 # execution snapshot.  Keep all file-opening features constrained nevertheless:
 # the main log stays on inherited stderr (service.log), while TLS key logging and
-# DoH client X.509 authentication remain unsupported in v0.9.1. Ambiguous TOML
+# DoH client X.509 authentication remain unsupported. Ambiguous TOML
 # is rejected byte-identically before an execution snapshot is published.
 config_root_open_paths_are_safe() {
   _root_path_config="$1"
@@ -1079,9 +1104,11 @@ cleanup_config_check_snapshot() {
 prepare_config_check_snapshot() {
   _check_source_config="$1"
   _check_snapshot_dir="$2"
+  _check_list_source="${3:-$CONFIG_DIR}"
   _check_snapshot_config="$_check_snapshot_dir/dnscrypt-proxy.toml"
   _check_snapshot_pid="$_check_snapshot_dir/.pid"
   runtime_config_inputs_are_trusted || return 1
+  config_check_list_source_is_trusted "$_check_list_source" || return 1
   runtime_config_path_is_safe "$_check_source_config" || return 1
   [ -f "$_check_source_config" ] && [ ! -L "$_check_source_config" ] || return 1
   _check_source_identity=$(managed_config_expected_identity) || return 1
@@ -1103,7 +1130,7 @@ prepare_config_check_snapshot() {
   fi
   for _check_snapshot_name in allowed-names.txt blocked-names.txt allowed-ips.txt blocked-ips.txt
   do
-    cp "$CONFIG_DIR/$_check_snapshot_name" \
+    cp "$_check_list_source/$_check_snapshot_name" \
       "$_check_snapshot_dir/$_check_snapshot_name" || {
         cleanup_config_check_snapshot "$_check_snapshot_dir" >/dev/null 2>&1 || true
         return 1
@@ -1273,6 +1300,7 @@ run_bounded_config_check() {
   _bounded_check_config="$1"
   _bounded_check_log="$2"
   _bounded_check_binary="${3:-$DNSCRYPT_BIN}"
+  _bounded_check_list_source="${4:-$CONFIG_DIR}"
   _bounded_check_limit=${DNSCRYPT_CONFIG_CHECK_TIMEOUT_SECONDS:-${DNSCRYPT_SOURCE_PREFLIGHT_TIMEOUT_SECONDS:-660}}
   case "$_bounded_check_limit" in
     ""|*[!0-9]*|0) _bounded_check_limit=660 ;;
@@ -1296,6 +1324,7 @@ run_bounded_config_check() {
   has_cmd su || return 126
   _bounded_snapshot_dir="$RUNTIME_ROOT/.config-check.$$"
   prepare_config_check_snapshot "$_bounded_check_config" "$_bounded_snapshot_dir" \
+    "$_bounded_check_list_source" \
     || return 126
   _bounded_runtime_config="$_bounded_snapshot_dir/dnscrypt-proxy.toml"
   _bounded_pid_file="$_bounded_snapshot_dir/.pid"

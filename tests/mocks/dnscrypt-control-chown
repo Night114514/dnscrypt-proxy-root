@@ -13,6 +13,7 @@ for mock_chown_path in "$@"; do
   [ -e "$mock_chown_path" ] || [ -L "$mock_chown_path" ] || exit 64
   case "$mock_chown_path" in
     "$MOCK_RUNTIME_SOURCE_ROOT/state"|"$MOCK_RUNTIME_SOURCE_ROOT/state/"*|\
+    "$MOCK_RUNTIME_SOURCE_ROOT/run"|"$MOCK_RUNTIME_SOURCE_ROOT/run/"*|\
     "$MOCK_RUNTIME_ROOT"|"$MOCK_RUNTIME_ROOT/"*|\
     "$MOCK_RUNTIME_ROOT.creating"|"$MOCK_RUNTIME_ROOT.creating/"*|\
     "$MOCK_RUNTIME_ROOT.removing"|"$MOCK_RUNTIME_ROOT.removing/"*) ;;

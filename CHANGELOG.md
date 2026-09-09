@@ -1,5 +1,54 @@
 # Changelog
 
+## v0.9.2 (2026-09-09)
+
+> **Device-evidence boundary:** the automated dash, BusyBox ash, JavaScript, lint, archive, and
+> rollback suites described below do not replace Android hardware acceptance. The public
+> `REAL_DEVICE_ACCEPTANCE.md` matrix remains explicitly `NOT RUN` for v0.9.2.
+
+### Canonical configuration transactions
+
+- Route every managed-list read and write through the validated root control API. The WebUI no
+  longer reads template files from the module directory while saving to a different canonical
+  location.
+- Distinguish a saved canonical generation from the active daemon snapshot in `status` and in the
+  WebUI. List edits now offer separate **Save (pending)** and **Save and apply** operations.
+- Make save-and-apply compensating: if the new list generation cannot restart cleanly, restore the
+  previous canonical list and restart the last known working generation. Refuse the operation
+  before changing its target when another canonical generation is already pending or unavailable.
+  If even the rollback install fails, retain the validated old-list backup and report its exact path
+  instead of deleting the only known-working bytes.
+- Export strict, fixed-schema generation manifests and validate every imported TOML/list/subscription
+  field before commit. Imports validate the complete staged generation with its staged lists, keep
+  a full-generation backup plus recovery marker, and roll back every canonical input on commit
+  failure or interruption. Every control action performs pending interrupted-import recovery before
+  dispatch, including read-only status calls. Subscription JSON also has an exact HTTPS-URL/boolean
+  object schema, while ordinary multiline JSON formatting remains supported.
+
+### Diagnostics and control-plane observability
+
+- Expose `config_apply_state` alongside the existing process, local-DNS, upstream, firewall,
+  integration-mode, and start-failure signals.
+- Label strict-mode destination DNS comparisons as `policy_affected`: the query is subject to the
+  module's redirect policy and is not represented as a direct policy-bypass measurement.
+- Replace the unrebuildable development React bundle with a deterministic, zero-dependency WebUI
+  source tree. The generated five-file WebUI renders backend-reported health, service state,
+  `strict`/`upstream_only`, firewall state, and pending configuration without synthetic fallback
+  data. Its bridge supports current KernelSU callbacks, legacy synchronous bridges, and
+  Promise-based hosts.
+
+### Release, cleanup, and licensing
+
+- Clean up only the updater workspace owned by the interrupted process on `EXIT`, `HUP`, `INT`, or
+  `TERM`; unrelated temporary paths remain untouched.
+- Carry forward the reviewed external-`su` timing fix so the same shell contract is stable under
+  both dash and BusyBox ash.
+- Pin automatic-release packaging to the exact event SHA that passed the reusable test workflow,
+  and abort if `master` advances before packaging.
+- Add the project MIT license, the complete GPLv3 text and provenance for the verbatim Magisk
+  installer, and the dnscrypt-proxy ISC notice. Both release workflows verify these non-empty files
+  inside the produced ZIP and check that committed WebUI output is reproducible.
+
 ## v0.9.1 (2026-09-07)
 
 > **Upgrade warning:** Before flashing over v0.9.0 or older, export or record configuration, lists,

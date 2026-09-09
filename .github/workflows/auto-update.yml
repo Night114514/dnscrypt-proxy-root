@@ -37,7 +37,22 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: master
+          ref: ${{ github.sha }}
+
+      - name: Verify tested commit is still the release tip
+        run: |
+          TESTED_SHA='${{ github.sha }}'
+          CHECKED_OUT_SHA=$(git rev-parse HEAD)
+          [ "$CHECKED_OUT_SHA" = "$TESTED_SHA" ] || {
+            echo "Checkout $CHECKED_OUT_SHA does not match tested event commit $TESTED_SHA." >&2
+            exit 1
+          }
+          git fetch origin master
+          MASTER_SHA=$(git rev-parse origin/master)
+          [ "$MASTER_SHA" = "$TESTED_SHA" ] || {
+            echo "master advanced to $MASTER_SHA after $TESTED_SHA was selected for testing; rerun required." >&2
+            exit 1
+          }
 
       - name: Read and validate upstream version
         id: upstream
@@ -216,10 +231,14 @@ jobs:
         env:
           ZIP_NAME: ${{ steps.module.outputs.zip_name }}
         run: |
+          node webui/build.mjs --check
           zip -r "$ZIP_NAME" \
             META-INF \
             config \
+            LICENSE \
+            LICENSES \
             scripts \
+            THIRD_PARTY_NOTICES.md \
             webroot \
             action.sh \
             customize.sh \
@@ -254,12 +273,13 @@ jobs:
           for DATA_FILE in \
             META-INF/com/google/android/updater-script \
             config/dnscrypt-proxy.toml \
-            webroot/addons/addons.css \
-            webroot/addons/leak-test.js \
-            webroot/addons/theme.css \
-            webroot/addons/theme.js \
-            webroot/assets/index-BRNBHrsZ.css \
-            webroot/assets/index-CD85Tj2j.js \
+            LICENSE \
+            LICENSES/GPL-3.0-only.txt \
+            LICENSES/ISC-dnscrypt-proxy.txt \
+            THIRD_PARTY_NOTICES.md \
+            webroot/assets/app.css \
+            webroot/assets/app.js \
+            webroot/assets/bridge.js \
             webroot/icon.svg \
             webroot/index.html \
             module.prop \
@@ -268,6 +288,10 @@ jobs:
           do
             [ "$(stat -c '%a' "$ARCHIVE_ROOT/$DATA_FILE")" = 644 ] || {
               echo "Release data file has the wrong mode: $DATA_FILE" >&2
+              exit 1
+            }
+            [ "$DATA_FILE" = skip_mount ] || [ -s "$ARCHIVE_ROOT/$DATA_FILE" ] || {
+              echo "Release data file is empty: $DATA_FILE" >&2
               exit 1
             }
           done

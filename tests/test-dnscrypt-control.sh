@@ -173,6 +173,8 @@ setup_fixture() {
   MOCK_DAEMON_PROBE_MODE=success
   MOCK_DAEMON_REQUIRE_CHECK_CONFIG_DIR=0
   MOCK_DAEMON_REQUIRE_SU=0
+  MOCK_DAEMON_REQUIRE_IMPORTED_ALLOWED=
+  MOCK_DAEMON_REJECT_ALLOWED_ON_START=
   MOCK_DAEMON_REPLACE_CHECK_STAGE_TARGET=
   MOCK_DAEMON_START_MODE=success
   MOCK_LOCAL_HANDLER_MODE=success
@@ -279,6 +281,7 @@ setup_fixture() {
   export MOCK_PRIVATE_DNS_MODE_FILE MOCK_PRIVATE_DNS_SPECIFIER_FILE
   export MOCK_DAEMON_REJECT_FAMILY_ON_START MOCK_DAEMON_PROBE_MODE
   export MOCK_DAEMON_REQUIRE_CHECK_CONFIG_DIR MOCK_DAEMON_REQUIRE_SU
+  export MOCK_DAEMON_REQUIRE_IMPORTED_ALLOWED MOCK_DAEMON_REJECT_ALLOWED_ON_START
   export MOCK_DAEMON_REPLACE_CHECK_STAGE_TARGET
   export MOCK_DAEMON_START_MODE
   export MOCK_LOCAL_HANDLER_MODE
@@ -480,6 +483,352 @@ test_save_list_b64_is_exact_atomic_and_fail_closed() {
   done
 }
 
+test_get_list_reads_only_the_canonical_validated_target() {
+  printf 'canonical.example\n# exact bytes\n' > "$MODULE_DIR/config/allowed-names.txt"
+
+  output=$(run_control get-list allowed-names 2>&1)
+  status=$?
+  assert_eq 0 "$status" "get-list rejected a valid canonical list: $output" || return 1
+  assert_eq "$(cat "$MODULE_DIR/config/allowed-names.txt")" "$output" \
+    "get-list did not return the canonical list bytes" || return 1
+
+  output=$(run_control get-list ../../allowed-names 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "get-list accepted an unknown/path-like kind" || return 1
+  assert_contains "$output" 'Unknown list type.' \
+    "get-list did not report a rejected kind"
+}
+
+test_subscription_schema_is_strict_and_multiline_portable() {
+  target="$MODULE_DIR/config/subscriptions.json"
+  printf '%s\n' '[{"url":"https://old.example/list","enabled":true}]' > "$target"
+  chmod 0600 "$target"
+  baseline="$CURRENT_CASE_DIR/subscriptions-baseline.json"
+  cp "$target" "$baseline"
+
+  invalid_index=0
+  for invalid_payload in \
+    '[not json]' \
+    '[{"url":"https://lists.example/one.txt","enabled":"true"}]' \
+    '[{"url":"http://lists.example/one.txt","enabled":true}]' \
+    '[{"url":"https://lists.example/one.txt","enabled":true,"extra":1}]' \
+    '[{"url":"https://lists.example/one.txt","url":"https://lists.example/two.txt"}]'
+  do
+    invalid_index=$((invalid_index + 1))
+    invalid_file="$CURRENT_CASE_DIR/subscriptions-invalid-$invalid_index.json"
+    printf '%s\n' "$invalid_payload" > "$invalid_file"
+    invalid_b64=$(host_b64_file "$invalid_file") || return 1
+    output=$(run_control save-subscriptions-b64 "$invalid_b64" 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] \
+      || fail "invalid subscription schema was accepted: $invalid_payload" || return 1
+    assert_contains "$output" 'strict JSON array' \
+      "invalid subscription schema did not report a strict-schema error" || return 1
+    cmp -s "$baseline" "$target" \
+      || fail "invalid subscription schema changed the canonical file" || return 1
+  done
+
+  pretty_file="$CURRENT_CASE_DIR/subscriptions-pretty.json"
+  printf '%s\n' \
+    '[' \
+    '  {' \
+    '    "enabled": true,' \
+    '    "url": "https://lists.example/one.txt?format=domains&v=2"' \
+    '  },' \
+    '  {' \
+    '    "url": "https://lists.example/two.txt",' \
+    '    "enabled": false' \
+    '  }' \
+    ']' > "$pretty_file"
+  pretty_b64=$(host_b64_file "$pretty_file") || return 1
+  output=$(run_control save-subscriptions-b64 "$pretty_b64" 2>&1)
+  status=$?
+  assert_eq 0 "$status" "valid multiline subscriptions were rejected: $output" || return 1
+  cmp -s "$pretty_file" "$target" \
+    || fail "valid multiline subscriptions were not preserved exactly" || return 1
+
+  printf '%s\n' 'downloaded.example' > "$MOCK_SUBSCRIPTION_PAYLOAD"
+  output=$(run_control apply-subscriptions 2>&1)
+  status=$?
+  assert_eq 0 "$status" "multiline subscriptions were not portable to the apply parser: $output" || return 1
+  assert_file_contains "$MOCK_CALL_LOG" \
+    'busybox wget ' \
+    "enabled multiline subscription was not downloaded" || return 1
+  assert_file_contains "$MODULE_DIR/config/blocked-names.txt" 'downloaded.example' \
+    "enabled multiline subscription was not merged"
+}
+
+test_import_schema_generation_validation_and_failure_rollback() {
+  sed 's/\r$//' "$MOCK_SOURCE_DIR/dnscrypt-control-daemon" > "$MODULE_DIR/bin/dnscrypt-proxy"
+  chmod 0755 "$MODULE_DIR/bin/dnscrypt-proxy"
+
+  old_dir="$CURRENT_CASE_DIR/old-generation"
+  new_dir="$CURRENT_CASE_DIR/new-generation"
+  mkdir -p "$old_dir" "$new_dir"
+  cp "$MODULE_DIR/config/dnscrypt-proxy.toml" "$old_dir/dnscrypt-proxy.toml"
+  printf 'old-blocked.example\n' > "$MODULE_DIR/config/blocked-names.txt"
+  printf 'old-allowed.example\n' > "$MODULE_DIR/config/allowed-names.txt"
+  printf '192.0.2.10\n' > "$MODULE_DIR/config/blocked-ips.txt"
+  printf '192.0.2.11\n' > "$MODULE_DIR/config/allowed-ips.txt"
+  printf '[{"url":"https://old.example/list","enabled":true}]\n' \
+    > "$MODULE_DIR/config/subscriptions.json"
+  chmod 0600 "$MODULE_DIR/config/subscriptions.json"
+  for generation_name in blocked-names.txt allowed-names.txt blocked-ips.txt allowed-ips.txt subscriptions.json; do
+    cp "$MODULE_DIR/config/$generation_name" "$old_dir/$generation_name"
+  done
+
+  printf '%s\n' \
+    "user_name = '3003'" \
+    "server_names = ['quad9-dnscrypt-ip4-filter-pri']" \
+    "listen_addresses = ['127.0.0.1:5354']" > "$new_dir/dnscrypt-proxy.toml"
+  printf 'new-blocked.example\n' > "$new_dir/blocked-names.txt"
+  printf 'new-allowed.example\n' > "$new_dir/allowed-names.txt"
+  printf '198.51.100.10\n' > "$new_dir/blocked-ips.txt"
+  printf '198.51.100.11\n' > "$new_dir/allowed-ips.txt"
+  printf '%s\n' \
+    '[' \
+    '  {' \
+    '    "enabled": false,' \
+    '    "url": "https://new.example/list"' \
+    '  }' \
+    ']' > "$new_dir/subscriptions.json"
+
+  config_b64=$(host_b64_file "$new_dir/dnscrypt-proxy.toml") || return 1
+  blocked_names_b64=$(host_b64_file "$new_dir/blocked-names.txt") || return 1
+  allowed_names_b64=$(host_b64_file "$new_dir/allowed-names.txt") || return 1
+  blocked_ips_b64=$(host_b64_file "$new_dir/blocked-ips.txt") || return 1
+  allowed_ips_b64=$(host_b64_file "$new_dir/allowed-ips.txt") || return 1
+  subscriptions_b64=$(host_b64_file "$new_dir/subscriptions.json") || return 1
+  valid_manifest="$CURRENT_CASE_DIR/import-v2.json"
+  printf '{"version":2,"config":"%s","blocked_names":"%s","allowed_names":"%s","blocked_ips":"%s","allowed_ips":"%s","subscriptions":"%s"}\n' \
+    "$config_b64" "$blocked_names_b64" "$allowed_names_b64" \
+    "$blocked_ips_b64" "$allowed_ips_b64" "$subscriptions_b64" > "$valid_manifest"
+
+  malformed_manifest="$CURRENT_CASE_DIR/import-invalid.json"
+  sed 's/"version":2/"version":"2"/' "$valid_manifest" > "$malformed_manifest"
+  malformed_b64=$(host_b64_file "$malformed_manifest") || return 1
+  output=$(run_control import-config-b64 "$malformed_b64" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a mistyped import schema version was accepted" || return 1
+  assert_contains "$output" 'schema' "invalid import schema was not identified" || return 1
+  for generation_name in dnscrypt-proxy.toml blocked-names.txt allowed-names.txt blocked-ips.txt allowed-ips.txt subscriptions.json; do
+    cmp -s "$old_dir/$generation_name" "$MODULE_DIR/config/$generation_name" \
+      || fail "invalid schema changed $generation_name" || return 1
+  done
+
+  invalid_subscriptions="$CURRENT_CASE_DIR/import-invalid-subscriptions.json"
+  printf '%s\n' '[not json]' > "$invalid_subscriptions"
+  invalid_subscriptions_b64=$(host_b64_file "$invalid_subscriptions") || return 1
+  malformed_manifest="$CURRENT_CASE_DIR/import-invalid-subscriptions-manifest.json"
+  printf '{"version":2,"config":"%s","blocked_names":"%s","allowed_names":"%s","blocked_ips":"%s","allowed_ips":"%s","subscriptions":"%s"}\n' \
+    "$config_b64" "$blocked_names_b64" "$allowed_names_b64" \
+    "$blocked_ips_b64" "$allowed_ips_b64" "$invalid_subscriptions_b64" > "$malformed_manifest"
+  malformed_b64=$(host_b64_file "$malformed_manifest") || return 1
+  output=$(run_control import-config-b64 "$malformed_b64" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "malformed decoded subscriptions were imported" || return 1
+  assert_contains "$output" 'strict URL/enabled schema' \
+    "malformed decoded subscriptions did not report their schema error" || return 1
+  for generation_name in dnscrypt-proxy.toml blocked-names.txt allowed-names.txt blocked-ips.txt allowed-ips.txt subscriptions.json; do
+    cmp -s "$old_dir/$generation_name" "$MODULE_DIR/config/$generation_name" \
+      || fail "invalid decoded subscriptions changed $generation_name" || return 1
+  done
+
+  import_b64=$(host_b64_file "$valid_manifest") || return 1
+  MOCK_DAEMON_REQUIRE_IMPORTED_ALLOWED=new-allowed.example
+  export MOCK_DAEMON_REQUIRE_IMPORTED_ALLOWED
+  output=$(run_control import-config-b64 "$import_b64" 2>&1)
+  status=$?
+  assert_eq 0 "$status" "complete staged generation validation failed: $output" || return 1
+  for generation_name in dnscrypt-proxy.toml blocked-names.txt allowed-names.txt blocked-ips.txt allowed-ips.txt subscriptions.json; do
+    cmp -s "$new_dir/$generation_name" "$MODULE_DIR/config/$generation_name" \
+      || fail "successful import did not install $generation_name exactly" || return 1
+    [ -f "$MODULE_DIR/run/config-generation-backup/$generation_name" ] \
+      || fail "full previous generation omitted $generation_name" || return 1
+  done
+
+  for failed_commit_name in \
+    dnscrypt-proxy.toml blocked-names.txt allowed-names.txt blocked-ips.txt allowed-ips.txt subscriptions.json
+  do
+    for generation_name in dnscrypt-proxy.toml blocked-names.txt allowed-names.txt blocked-ips.txt allowed-ips.txt subscriptions.json; do
+      cp "$old_dir/$generation_name" "$MODULE_DIR/config/$generation_name"
+    done
+    chmod 0600 "$MODULE_DIR/config/"*.txt "$MODULE_DIR/config/dnscrypt-proxy.toml" \
+      "$MODULE_DIR/config/subscriptions.json"
+    MOCK_MV_MODE=fail_nth
+    MOCK_INSTALL_TARGET="$MODULE_DIR/config/$failed_commit_name"
+    MOCK_MV_FAIL_MATCH_COUNT=1
+    : > "$MOCK_MV_MATCH_COUNT_FILE"
+    export MOCK_MV_MODE MOCK_INSTALL_TARGET MOCK_MV_FAIL_MATCH_COUNT
+    output=$(run_control import-config-b64 "$import_b64" 2>&1)
+    status=$?
+    MOCK_MV_MODE=success
+    MOCK_INSTALL_TARGET=
+    export MOCK_MV_MODE MOCK_INSTALL_TARGET
+    [ "$status" -ne 0 ] \
+      || fail "failure at $failed_commit_name was reported as a successful import" || return 1
+    assert_contains "$output" "Import failed at $failed_commit_name" \
+      "failed generation install did not identify $failed_commit_name: $output" || return 1
+    assert_contains "$output" 'complete previous generation was restored' \
+      "failed generation install did not report full rollback: $output" || return 1
+    for generation_name in dnscrypt-proxy.toml blocked-names.txt allowed-names.txt blocked-ips.txt allowed-ips.txt subscriptions.json; do
+      cmp -s "$old_dir/$generation_name" "$MODULE_DIR/config/$generation_name" \
+        || fail "failure at $failed_commit_name did not restore $generation_name exactly" || return 1
+    done
+    assert_not_exists "$MODULE_DIR/run/config-import.transaction" \
+      "failure at $failed_commit_name left the transaction marker behind" || return 1
+  done
+
+  output=$(run_control import-config-b64 "$import_b64" 2>&1)
+  status=$?
+  assert_eq 0 "$status" "failed to prepare an interrupted-import recovery fixture: $output" || return 1
+  printf '%s\n' 'backup=config-generation-backup' \
+    > "$MODULE_DIR/run/config-import.transaction"
+  chmod 0600 "$MODULE_DIR/run/config-import.transaction"
+  printf '%s\n' upstream_only > "$MODULE_DIR/state/dns-mode.state"
+  MOCK_DAEMON_REQUIRE_IMPORTED_ALLOWED=
+  export MOCK_DAEMON_REQUIRE_IMPORTED_ALLOWED
+  output=$(run_control status 2>&1)
+  status=$?
+  assert_eq 0 "$status" "the next control action did not recover an interrupted import: $output" || return 1
+  for generation_name in dnscrypt-proxy.toml blocked-names.txt allowed-names.txt blocked-ips.txt allowed-ips.txt subscriptions.json; do
+    cmp -s "$old_dir/$generation_name" "$MODULE_DIR/config/$generation_name" \
+      || fail "next-control recovery did not restore $generation_name exactly" || return 1
+  done
+  assert_not_exists "$MODULE_DIR/run/config-import.transaction" \
+    "next-control recovery left the transaction marker behind" || return 1
+  output=$(run_control start 2>&1)
+  status=$?
+  assert_eq 0 "$status" "the restored generation did not start: $output" || return 1
+  run_common_probe 'is_dnscrypt_ready' \
+    || fail "the restored generation did not become ready" || return 1
+  run_control stop >/dev/null 2>&1
+}
+
+test_save_list_apply_restarts_and_rolls_back_as_one_operation() {
+  prepare_runtime_tree_fixture || return 1
+  printf '%s\n' upstream_only > "$MODULE_DIR/state/dns-mode.state"
+  printf 'working.example\n' > "$MODULE_DIR/config/allowed-names.txt"
+  run_control start >/dev/null 2>&1 || return 1
+
+  applied_payload_file="$CURRENT_CASE_DIR/applied-list.txt"
+  printf 'applied.example\n' > "$applied_payload_file"
+  applied_payload=$(host_b64_file "$applied_payload_file") || return 1
+  output=$(run_control save-list-b64 allowed-names "$applied_payload" apply 2>&1)
+  status=$?
+  assert_eq 0 "$status" "save-and-apply rejected a valid list: $output" || return 1
+  assert_contains "$output" 'saved and applied' "save-and-apply result was ambiguous" || return 1
+  cmp -s "$applied_payload_file" "$DNSCRYPT_RUNTIME_ROOT/config/allowed-names.txt" \
+    || fail "save-and-apply did not update the canonical list" || return 1
+  cmp -s "$applied_payload_file" "$DNSCRYPT_RUNTIME_ROOT/active/allowed-names.txt" \
+    || fail "save-and-apply did not update the running snapshot" || return 1
+  output=$(run_control status 2>&1)
+  assert_contains "$output" '"config_apply_state":"applied"' \
+    "status did not expose the applied generation" || return 1
+
+  rejected_payload_file="$CURRENT_CASE_DIR/rejected-list.txt"
+  printf 'rejected.example\n' > "$rejected_payload_file"
+  rejected_payload=$(host_b64_file "$rejected_payload_file") || return 1
+  MOCK_DAEMON_REJECT_ALLOWED_ON_START=rejected.example
+  export MOCK_DAEMON_REJECT_ALLOWED_ON_START
+  output=$(run_control save-list-b64 allowed-names "$rejected_payload" apply 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a rejected save-and-apply was reported as success" || return 1
+  assert_contains "$output" 'previous working list was restored' \
+    "failed save-and-apply did not report rollback: $output" || return 1
+  cmp -s "$applied_payload_file" "$DNSCRYPT_RUNTIME_ROOT/config/allowed-names.txt" \
+    || fail "failed save-and-apply changed the canonical working list" || return 1
+  cmp -s "$applied_payload_file" "$DNSCRYPT_RUNTIME_ROOT/active/allowed-names.txt" \
+    || fail "failed save-and-apply did not restore the active snapshot" || return 1
+  run_common_probe 'is_dnscrypt_ready' \
+    || fail "failed save-and-apply did not recover the prior daemon generation" || return 1
+
+  rollback_failure_file="$CURRENT_CASE_DIR/rollback-failure-list.txt"
+  printf 'rollback-failure.example\n' > "$rollback_failure_file"
+  rollback_failure_payload=$(host_b64_file "$rollback_failure_file") || return 1
+  MOCK_DAEMON_REJECT_ALLOWED_ON_START=rollback-failure.example
+  MOCK_MV_MODE=fail_nth
+  MOCK_INSTALL_TARGET="$DNSCRYPT_RUNTIME_ROOT/config/allowed-names.txt"
+  MOCK_MV_FAIL_MATCH_COUNT=2
+  : > "$MOCK_MV_MATCH_COUNT_FILE"
+  export MOCK_DAEMON_REJECT_ALLOWED_ON_START MOCK_MV_MODE MOCK_INSTALL_TARGET
+  export MOCK_MV_FAIL_MATCH_COUNT MOCK_MV_MATCH_COUNT_FILE
+  output=$(run_control save-list-b64 allowed-names "$rollback_failure_payload" apply 2>&1)
+  status=$?
+  assert_eq 3 "$status" "list rollback-install failure did not return status 3: $output" || return 1
+  assert_contains "$output" 'rollback_failed' \
+    "list rollback-install failure was reported as a successful restore: $output" || return 1
+  preserved_backup=
+  preserved_backup_count=0
+  for backup_candidate in \
+    "$DNSCRYPT_RUNTIME_ROOT/config"/.list-backup.allowed-names.*
+  do
+    [ -e "$backup_candidate" ] || [ -L "$backup_candidate" ] || continue
+    preserved_backup=$backup_candidate
+    preserved_backup_count=$((preserved_backup_count + 1))
+  done
+  assert_eq 1 "$preserved_backup_count" \
+    "rollback-install failure did not preserve exactly one working-list backup" || return 1
+  assert_contains "$output" "$preserved_backup" \
+    "rollback-install failure did not report the preserved backup path: $output" || return 1
+  cmp -s "$applied_payload_file" "$preserved_backup" \
+    || fail "preserved working-list backup does not contain the prior canonical bytes" || return 1
+  run_common_probe "managed_config_input_is_trusted '$preserved_backup'" \
+    || fail "preserved working-list backup does not retain trusted owner/mode" || return 1
+
+  MOCK_MV_MODE=success
+  MOCK_INSTALL_TARGET=
+  MOCK_MV_FAIL_MATCH_COUNT=0
+  MOCK_DAEMON_REJECT_ALLOWED_ON_START=
+  export MOCK_MV_MODE MOCK_INSTALL_TARGET MOCK_MV_FAIL_MATCH_COUNT
+  export MOCK_DAEMON_REJECT_ALLOWED_ON_START
+  "$TOOL_BIN/mv" -f "$preserved_backup" \
+    "$DNSCRYPT_RUNTIME_ROOT/config/allowed-names.txt" || return 1
+  output=$(run_control start 2>&1)
+  status=$?
+  assert_eq 0 "$status" "the preserved working-list backup could not recover service: $output" || return 1
+  cmp -s "$applied_payload_file" "$DNSCRYPT_RUNTIME_ROOT/config/allowed-names.txt" \
+    || fail "manual recovery did not restore the prior canonical list" || return 1
+  cmp -s "$applied_payload_file" "$DNSCRYPT_RUNTIME_ROOT/active/allowed-names.txt" \
+    || fail "manual recovery did not restore the prior active list" || return 1
+  run_common_probe 'is_dnscrypt_ready' \
+    || fail "manual recovery from the preserved list backup did not revive the daemon" || return 1
+
+  before_pending_apply="$CURRENT_CASE_DIR/allowed-before-pending-apply.txt"
+  cp "$DNSCRYPT_RUNTIME_ROOT/config/allowed-names.txt" "$before_pending_apply"
+  printf 'unrelated-pending.example\n' \
+    > "$DNSCRYPT_RUNTIME_ROOT/config/blocked-names.txt"
+  pending_apply_file="$CURRENT_CASE_DIR/pending-apply-list.txt"
+  printf 'must-not-install.example\n' > "$pending_apply_file"
+  pending_apply_payload=$(host_b64_file "$pending_apply_file") || return 1
+  output=$(run_control save-list-b64 allowed-names "$pending_apply_payload" apply 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "save-and-apply accepted an already pending generation" || return 1
+  assert_contains "$output" 'canonical generation already has pending' \
+    "pending-generation apply refusal was ambiguous: $output" || return 1
+  cmp -s "$before_pending_apply" "$DNSCRYPT_RUNTIME_ROOT/config/allowed-names.txt" \
+    || fail "refused pending-generation apply changed its target list" || return 1
+  cmp -s "$before_pending_apply" "$DNSCRYPT_RUNTIME_ROOT/active/allowed-names.txt" \
+    || fail "refused pending-generation apply changed the active target list" || return 1
+  run_common_probe 'is_dnscrypt_ready' \
+    || fail "refused pending-generation apply disturbed the working daemon" || return 1
+  output=$(run_control status 2>&1)
+  assert_contains "$output" '"config_apply_state":"pending"' \
+    "refused pending-generation apply did not preserve the pending state" || return 1
+
+  pending_payload_file="$CURRENT_CASE_DIR/pending-list.txt"
+  printf 'pending.example\n' > "$pending_payload_file"
+  pending_payload=$(host_b64_file "$pending_payload_file") || return 1
+  output=$(run_control save-list-b64 allowed-names "$pending_payload" 2>&1)
+  status=$?
+  assert_eq 0 "$status" "save-only rejected a valid list: $output" || return 1
+  assert_contains "$output" 'pending application' "save-only hid its pending state" || return 1
+  output=$(run_control status 2>&1)
+  assert_contains "$output" '"config_apply_state":"pending"' \
+    "status did not expose unapplied canonical changes" || return 1
+  run_control stop >/dev/null 2>&1
+}
+
 test_query_stats_matches_official_tsv_contract() {
   config_file="$MODULE_DIR/config/dnscrypt-proxy.toml"
   query_log="$MODULE_DIR/data/query-fixture.log"
@@ -658,7 +1007,9 @@ test_dns_test_uses_one_bounded_local_and_direct_query() {
   assert_eq 1 "$(grep -c '^su 3003 -c ' "$MOCK_CALL_LOG")" \
     "DNS diagnostic did not run its one-shot resolver as UID3003" || return 1
   assert_eq 1 "$(grep -c '^busybox timeout 8 nslookup dns.google 9.9.9.9$' "$MOCK_CALL_LOG")" \
-    "direct DNS comparison was not bounded by eight seconds"
+    "policy-affected DNS comparison was not bounded by eight seconds" || return 1
+  assert_contains "$output" '"comparison_scope":"policy_affected"' \
+    "strict-mode diagnostics claimed or implied a true policy bypass"
 }
 
 test_resolver_rtt_log_parsing() {
@@ -1111,6 +1462,14 @@ test_runtime_tree_is_copied_with_exact_layout_and_canonical_argv() {
     "unprivileged daemon PID handshake did not have the exact owner-only mode" || return 1
   assert_file_not_exact_line "$MOCK_CALL_LOG" "chmod 0755 $MOCK_RUNTIME_PARENT" \
     "runtime setup changed the parent directory mode" || return 1
+
+  # This check starts an external mock through background su and waits for its
+  # completion or PID handshake. Most tests replace sleep with a no-op, but that
+  # turns the bounded startup wait into a scheduler-dependent tight loop on a
+  # loaded CI runner. Preserve the real bounded wait at this async boundary.
+  printf '#!/bin/sh\nexec "%s" "$@"\n' "$HOST_SLEEP" > "$TOOL_BIN/sleep" \
+    || return 1
+  "$HOST_CHMOD" 0755 "$TOOL_BIN/sleep" || return 1
 
   : > "$MOCK_CALL_LOG"
   output=$(run_common_probe '
@@ -2420,7 +2779,7 @@ test_webui_relative_assets_and_android_source_invariants() {
   asset_paths=$(sed -n 's/.*\(src\|href\)="\.\/\([^"]*\)".*/\2/p' "$index_file")
   for asset_path in $asset_paths; do
     case "$asset_path" in
-      assets/*|addons/*) ;;
+      assets/*|icon.svg) ;;
       *) fail "unexpected relative WebUI asset path: $asset_path"; return 1 ;;
     esac
     [ -f "$ROOT_DIR/webroot/$asset_path" ] || {
@@ -2429,7 +2788,11 @@ test_webui_relative_assets_and_android_source_invariants() {
     }
     asset_count=$((asset_count + 1))
   done
-  assert_eq 6 "$asset_count" "not all WebUI entry assets were checked" || return 1
+  assert_eq 4 "$asset_count" "not all WebUI entry assets were checked" || return 1
+  [ ! -d "$ROOT_DIR/webroot/addons" ] || {
+    fail "legacy WebUI addons directory is still packaged"
+    return 1
+  }
 
   if grep -F -- '-port=5354' "$ROOT_DIR/scripts/dnscrypt-control.sh" >/dev/null 2>&1; then
     fail "Android-incompatible nslookup -port usage returned"
@@ -2499,6 +2862,10 @@ run_case 'backup pruning combines both filename families' test_backup_pruning_co
 run_case 'resolver whitespace is normalized and empty elements rejected' test_resolver_whitespace_and_empty_elements
 run_case 'BusyBox base64 fallback imports empty lists exactly' test_busybox_base64_fallback_and_empty_import
 run_case 'save-list-b64 is exact, atomic, and fail-closed' test_save_list_b64_is_exact_atomic_and_fail_closed
+run_case 'get-list reads the canonical validated list only' test_get_list_reads_only_the_canonical_validated_target
+run_case 'subscription JSON schema is strict and multiline-portable' test_subscription_schema_is_strict_and_multiline_portable
+run_case 'imports validate and transact one complete generation' test_import_schema_generation_validation_and_failure_rollback
+run_case 'save-and-apply restarts or restores the working list' test_save_list_apply_restarts_and_rolls_back_as_one_operation
 run_case 'query stats follow the official TSV fields and emit valid JSON' test_query_stats_matches_official_tsv_contract
 run_case 'subscription section replacement and failed-download rollback' test_subscription_section_replacement_and_failure_rollback
 run_case 'custom and disabled nx_log paths are honored' test_dynamic_nx_log_path_and_disabled_nx_log

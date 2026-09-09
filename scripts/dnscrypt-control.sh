@@ -6,6 +6,9 @@ MODDIR=$(cd "$SCRIPT_DIR/.." 2>/dev/null && pwd)
 . "$MODDIR/scripts/common.sh"
 
 ACTION="${1:-status}"
+IMPORT_TRANSACTION_FILE="$RUN_DIR/config-import.transaction"
+IMPORT_BACKUP_DIR="$RUN_DIR/config-generation-backup"
+CONTROL_LOCK_ACQUIRED=0
 
 # Millisecond timestamp. toybox's date lacks %N and echoes the literal "%N",
 # so fall back to second precision when nanoseconds are unavailable.
@@ -122,6 +125,19 @@ prepare_control_only_input() {
   control_only_config_input_is_trusted "$_control_input"
 }
 
+acquire_action_control_lock() {
+  [ "$CONTROL_LOCK_ACQUIRED" -eq 1 ] && return 0
+  if [ "${DNSCRYPT_CONTROL_LOCK_HELD:-0}" = "1" ]; then
+    inherited_control_lock_valid
+    _action_lock_status=$?
+  else
+    acquire_control_lock
+    _action_lock_status=$?
+  fi
+  [ "$_action_lock_status" -eq 0 ] || return "$_action_lock_status"
+  CONTROL_LOCK_ACQUIRED=1
+}
+
 manager_name() {
   if [ "${APATCH:-}" = "true" ] || [ -d /data/adb/ap ]; then
     echo "APatch"
@@ -186,6 +202,25 @@ enforce_dnscrypt_user() {
 }
 
 ensure_config() {
+  if [ -e "$IMPORT_TRANSACTION_FILE" ] || [ -L "$IMPORT_TRANSACTION_FILE" ]; then
+    acquire_action_control_lock
+    _recovery_lock_status=$?
+    case "$_recovery_lock_status" in
+      0) ;;
+      2)
+        echo "Another dnscrypt-proxy control operation is recovering configuration."
+        return 2
+        ;;
+      *)
+        echo "Failed to lock interrupted configuration recovery."
+        return 1
+        ;;
+    esac
+    recover_import_generation || {
+      echo "An interrupted configuration import could not be recovered safely."
+      return 1
+    }
+  fi
   ensure_runtime_tree || return 1
   if [ -e "$CONFIG_FILE" ] || [ -L "$CONFIG_FILE" ]; then
     config_file_is_trusted || return 1
@@ -1059,11 +1094,13 @@ validate_dnscrypt_config() {
   _validate_config_path="$1"
   _validate_log_path="$2"
   _validate_marker_prefix="$3"
+  _validate_list_source="${4:-$CONFIG_DIR}"
   case "$_validate_marker_prefix" in ""|*[!A-Za-z0-9_-]*) return 1 ;; esac
   CONFIG_CHECK_FAILURE=none
   _validate_marker="$_validate_marker_prefix=$$-$(date +%s 2>/dev/null || echo 0)"
   log_msg "$_validate_log_path" "$_validate_marker"
-  run_bounded_config_check "$_validate_config_path" "$_validate_log_path"
+  run_bounded_config_check "$_validate_config_path" "$_validate_log_path" \
+    "$DNSCRYPT_BIN" "$_validate_list_source"
   _validate_status=$?
   case "$_validate_status" in
     0) return 0 ;;
@@ -1817,6 +1854,38 @@ upstream_probe_state() {
   esac
 }
 
+config_apply_state() {
+  runtime_config_inputs_are_trusted || { printf '%s\n' unavailable; return 1; }
+  is_dnscrypt_running || { printf '%s\n' pending; return 0; }
+  if [ "$RUNTIME_ROOT" = "$MODDIR" ]; then
+    printf '%s\n' applied
+    return 0
+  fi
+  runtime_active_snapshot_at_is_trusted "$RUNTIME_ACTIVE_DIR" \
+    || { printf '%s\n' unavailable; return 1; }
+  _apply_compare_config="$RUN_DIR/config-apply-state.$$.toml"
+  rm -f "$_apply_compare_config"
+  if ! write_config_without_runtime_user "$CONFIG_FILE" "$_apply_compare_config"; then
+    rm -f "$_apply_compare_config"
+    printf '%s\n' unavailable
+    return 1
+  fi
+  _apply_matches=1
+  files_equal_exact "$_apply_compare_config" "$RUNTIME_CONFIG_FILE" \
+    || _apply_matches=0
+  rm -f "$_apply_compare_config"
+  for _apply_name in allowed-names.txt blocked-names.txt allowed-ips.txt blocked-ips.txt
+  do
+    files_equal_exact "$CONFIG_DIR/$_apply_name" "$RUNTIME_ACTIVE_DIR/$_apply_name" \
+      || _apply_matches=0
+  done
+  if [ "$_apply_matches" -eq 1 ]; then
+    printf '%s\n' applied
+  else
+    printf '%s\n' pending
+  fi
+}
+
 print_status() {
   running="false"
   pid=""
@@ -1843,6 +1912,8 @@ print_status() {
   esac
   upstream=$(upstream_probe_state)
   start_failure=$(get_start_failure 2>/dev/null || echo invalid)
+  config_apply=$(config_apply_state 2>/dev/null || true)
+  [ -n "$config_apply" ] || config_apply=unavailable
   version=$(installed_version)
   manager=$(manager_name)
   update_state="unknown"
@@ -1853,10 +1924,10 @@ print_status() {
     update_msg=$(sed -n 's/^message=//p' "$UPDATE_STATUS_FILE" | head -n 1)
     update_time=$(sed -n 's/^time=//p' "$UPDATE_STATUS_FILE" | head -n 1)
   fi
-  printf '{"running":%s,"healthy":%s,"pid":"%s","uid":"%s","listener":%s,"local_dns":%s,"dns_mode":"%s","service_state":"%s","start_failure":"%s","firewall":"%s","upstream":"%s","version":"%s","manager":"%s","config":"%s","update_state":"%s","update_message":"%s","update_time":"%s"}\n' \
+  printf '{"running":%s,"healthy":%s,"pid":"%s","uid":"%s","listener":%s,"local_dns":%s,"dns_mode":"%s","service_state":"%s","start_failure":"%s","firewall":"%s","upstream":"%s","config_apply_state":"%s","version":"%s","manager":"%s","config":"%s","update_state":"%s","update_message":"%s","update_time":"%s"}\n' \
     "$running" "$healthy" "$(shell_quote_json "$pid")" "$(shell_quote_json "$uid")" "$listener" "$local_dns" \
     "$(shell_quote_json "$dns_mode")" "$(shell_quote_json "$state")" "$(shell_quote_json "$start_failure")" "$(shell_quote_json "$firewall")" "$(shell_quote_json "$upstream")" \
-    "$(shell_quote_json "$version")" "$(shell_quote_json "$manager")" "$(shell_quote_json "$CONFIG_FILE")" \
+    "$(shell_quote_json "$config_apply")" "$(shell_quote_json "$version")" "$(shell_quote_json "$manager")" "$(shell_quote_json "$CONFIG_FILE")" \
     "$(shell_quote_json "$update_state")" "$(shell_quote_json "$update_msg")" "$(shell_quote_json "$update_time")"
 }
 
@@ -2143,7 +2214,7 @@ local_dns_query() {
 }
 
 # Keep interactive diagnostics from pinning the WebUI or control process when
-# Android's resolver, a direct DNS server, or the network is unresponsive.
+# Android's resolver, the named DNS destination, or the network is unresponsive.
 # Prefer a standalone timeout implementation and fall back to the root
 # manager's BusyBox applet, matching the portability contract used elsewhere.
 bounded_diagnostic_command() {
@@ -2229,21 +2300,25 @@ dns_test() {
     _latency=-1
     _result="Local DNS query failed or timed out"
   fi
-  # Also test direct (bypass) for comparison
+  # Query a named destination for comparison. In strict mode Android OUTPUT
+  # policy redirects this packet too, so it is explicitly not a bypass test.
+  _comparison_scope=direct_destination
+  [ "$(get_dns_mode 2>/dev/null || echo invalid)" != strict ] \
+    || _comparison_scope=policy_affected
   if has_cmd nslookup; then
     _direct=$(bounded_diagnostic_command 8 nslookup "$_domain" 9.9.9.9 2>&1) \
-      || _direct="Direct DNS query failed or timed out"
+      || _direct="Destination DNS query failed or timed out"
   elif has_cmd dig; then
     _direct=$(bounded_diagnostic_command 8 dig @9.9.9.9 "$_domain" \
       +short +time=5 +tries=1 2>&1) \
-      || _direct="Direct DNS query failed or timed out"
+      || _direct="Destination DNS query failed or timed out"
   else
     _direct="N/A"
   fi
   _result_escaped=$(printf '%s' "$_result" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' '|')
   _direct_escaped=$(printf '%s' "$_direct" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' '|')
-  printf '{"domain":"%s","result":"%s","direct":"%s","latency_ms":%d,"server":"127.0.0.1:%d"}\n' \
-    "$_domain" "$_result_escaped" "$_direct_escaped" "$_latency" "$PORT"
+  printf '{"domain":"%s","result":"%s","direct":"%s","comparison_scope":"%s","latency_ms":%d,"server":"127.0.0.1:%d"}\n' \
+    "$_domain" "$_result_escaped" "$_direct_escaped" "$_comparison_scope" "$_latency" "$PORT"
 }
 
 list_resolvers() {
@@ -2685,7 +2760,9 @@ get_current_mode() {
 }
 
 export_config() {
-  # Export full config as JSON (config + blocklists + resolver selection)
+  # Export one complete canonical generation. Version 2 is deliberately a
+  # compact, fixed-order schema so the BusyBox-only importer can validate every
+  # key and type before extracting any value.
   ensure_config || {
     echo "The live configuration inputs are unsafe; nothing was exported."
     return 1
@@ -2699,57 +2776,250 @@ export_config() {
   if [ -f "$CONFIG_DIR/subscriptions.json" ]; then
     _subs_b64=$(base64_encode_file "$CONFIG_DIR/subscriptions.json") || return 1
   fi
-  printf '{"version":1,"config":"%s","blocked_names":"%s","allowed_names":"%s","blocked_ips":"%s","allowed_ips":"%s","subscriptions":"%s"}\n' \
+  printf '{"version":2,"config":"%s","blocked_names":"%s","allowed_names":"%s","blocked_ips":"%s","allowed_ips":"%s","subscriptions":"%s"}\n' \
     "$_config_b64" "$_blocked_names_b64" "$_allowed_names_b64" "$_blocked_ips_b64" "$_allowed_ips_b64" "$_subs_b64"
 }
 
+import_backup_at_is_trusted() {
+  _generation_backup="$1"
+  case "$_generation_backup" in
+    "$IMPORT_BACKUP_DIR"|"$RUN_DIR/.config-generation-backup.$$") ;;
+    *) return 1 ;;
+  esac
+  [ -d "$_generation_backup" ] && [ ! -L "$_generation_backup" ] || return 1
+  _generation_control_uid=$(config_control_uid) || return 1
+  [ "$(stat -c '%u:%g:%a' "$_generation_backup" 2>/dev/null)" = \
+    "$_generation_control_uid:0:700" ] || return 1
+  for _generation_name in \
+    dnscrypt-proxy.toml blocked-names.txt allowed-names.txt blocked-ips.txt allowed-ips.txt
+  do
+    [ -f "$_generation_backup/$_generation_name" ] \
+      && [ ! -L "$_generation_backup/$_generation_name" ] \
+      && [ "$(stat -c '%u:%g:%a' "$_generation_backup/$_generation_name" 2>/dev/null)" = \
+        "$_generation_control_uid:0:600" ] || return 1
+  done
+  if [ -f "$_generation_backup/subscriptions.json" ] \
+    && [ ! -L "$_generation_backup/subscriptions.json" ]; then
+    [ ! -e "$_generation_backup/subscriptions.absent" ] \
+      && [ ! -L "$_generation_backup/subscriptions.absent" ] \
+      && [ "$(stat -c '%u:%g:%a' "$_generation_backup/subscriptions.json" 2>/dev/null)" = \
+        "$_generation_control_uid:0:600" ]
+    return $?
+  fi
+  [ -f "$_generation_backup/subscriptions.absent" ] \
+    && [ ! -L "$_generation_backup/subscriptions.absent" ] \
+    && [ "$(stat -c '%u:%g:%a' "$_generation_backup/subscriptions.absent" 2>/dev/null)" = \
+      "$_generation_control_uid:0:600" ]
+}
+
+import_transaction_marker_is_trusted() {
+  [ -f "$IMPORT_TRANSACTION_FILE" ] && [ ! -L "$IMPORT_TRANSACTION_FILE" ] || return 1
+  _transaction_control_uid=$(config_control_uid) || return 1
+  [ "$(stat -c '%u:%g:%a' "$IMPORT_TRANSACTION_FILE" 2>/dev/null)" = \
+    "$_transaction_control_uid:0:600" ] \
+    && [ "$(cat "$IMPORT_TRANSACTION_FILE" 2>/dev/null)" = \
+      'backup=config-generation-backup' ]
+}
+
+create_import_generation_backup() {
+  _backup_stage="$RUN_DIR/.config-generation-backup.$$"
+  _backup_control_uid=$(config_control_uid) || return 1
+  if [ -e "$_backup_stage" ] || [ -L "$_backup_stage" ]; then
+    import_backup_at_is_trusted "$_backup_stage" || return 1
+    chmod 0700 "$_backup_stage" 2>/dev/null || return 1
+    rm -rf "$_backup_stage" || return 1
+  fi
+  if [ -e "$IMPORT_BACKUP_DIR" ] || [ -L "$IMPORT_BACKUP_DIR" ]; then
+    import_backup_at_is_trusted "$IMPORT_BACKUP_DIR" || return 1
+    chmod 0700 "$IMPORT_BACKUP_DIR" 2>/dev/null || return 1
+    rm -rf "$IMPORT_BACKUP_DIR" || return 1
+  fi
+  mkdir "$_backup_stage" \
+    && chown "$_backup_control_uid:0" "$_backup_stage" 2>/dev/null \
+    && chmod 0700 "$_backup_stage" || return 1
+  for _backup_name in \
+    dnscrypt-proxy.toml blocked-names.txt allowed-names.txt blocked-ips.txt allowed-ips.txt
+  do
+    if ! cp "$CONFIG_DIR/$_backup_name" "$_backup_stage/$_backup_name" \
+      || ! chown "$_backup_control_uid:0" "$_backup_stage/$_backup_name" 2>/dev/null \
+      || ! chmod 0600 "$_backup_stage/$_backup_name"; then
+      rm -rf "$_backup_stage"
+      return 1
+    fi
+  done
+  if [ -f "$CONFIG_DIR/subscriptions.json" ]; then
+    if ! cp "$CONFIG_DIR/subscriptions.json" "$_backup_stage/subscriptions.json" \
+      || ! chown "$_backup_control_uid:0" "$_backup_stage/subscriptions.json" 2>/dev/null \
+      || ! chmod 0600 "$_backup_stage/subscriptions.json"; then
+      rm -rf "$_backup_stage"
+      return 1
+    fi
+  else
+    : > "$_backup_stage/subscriptions.absent" \
+      && chown "$_backup_control_uid:0" "$_backup_stage/subscriptions.absent" 2>/dev/null \
+      && chmod 0600 "$_backup_stage/subscriptions.absent" || {
+        rm -rf "$_backup_stage"
+        return 1
+      }
+  fi
+  import_backup_at_is_trusted "$_backup_stage" \
+    && mv "$_backup_stage" "$IMPORT_BACKUP_DIR" \
+    && import_backup_at_is_trusted "$IMPORT_BACKUP_DIR" || {
+      [ ! -e "$_backup_stage" ] || rm -rf "$_backup_stage"
+      return 1
+    }
+  _transaction_tmp="$IMPORT_TRANSACTION_FILE.$$.tmp"
+  rm -f "$_transaction_tmp"
+  printf '%s\n' 'backup=config-generation-backup' > "$_transaction_tmp" \
+    && chown "$_backup_control_uid:0" "$_transaction_tmp" 2>/dev/null \
+    && chmod 0600 "$_transaction_tmp" \
+    && mv -f "$_transaction_tmp" "$IMPORT_TRANSACTION_FILE" \
+    && import_transaction_marker_is_trusted
+}
+
+restore_import_generation_file() {
+  _restore_name="$1"
+  _restore_kind="$2"
+  _restore_stage=$(create_secure_config_temp ".import-restore.$_restore_name") || return 1
+  _restore_identity=$(secure_config_temp_identity "$_restore_stage") || {
+    rm -f "$_restore_stage"
+    return 1
+  }
+  if ! cat "$IMPORT_BACKUP_DIR/$_restore_name" > "$_restore_stage" \
+    || ! secure_config_temp_valid "$_restore_stage" "$_restore_identity" 600; then
+    rm -f "$_restore_stage"
+    return 1
+  fi
+  case "$_restore_kind" in
+    config) prepare_secure_config_temp_for_proxy "$_restore_stage" "$_restore_identity" ;;
+    managed) prepare_managed_input_for_proxy "$_restore_stage" ;;
+    control) prepare_control_only_input "$_restore_stage" ;;
+    *) rm -f "$_restore_stage"; return 1 ;;
+  esac || {
+    rm -f "$_restore_stage"
+    return 1
+  }
+  mv -f "$_restore_stage" "$CONFIG_DIR/$_restore_name" || {
+    rm -f "$_restore_stage"
+    return 1
+  }
+}
+
+recover_import_generation() {
+  if [ ! -e "$IMPORT_TRANSACTION_FILE" ] && [ ! -L "$IMPORT_TRANSACTION_FILE" ]; then
+    return 0
+  fi
+  import_transaction_marker_is_trusted \
+    && import_backup_at_is_trusted "$IMPORT_BACKUP_DIR" || return 1
+  restore_import_generation_file dnscrypt-proxy.toml config || return 1
+  for _restore_name in blocked-names.txt allowed-names.txt blocked-ips.txt allowed-ips.txt
+  do
+    restore_import_generation_file "$_restore_name" managed || return 1
+  done
+  if [ -f "$IMPORT_BACKUP_DIR/subscriptions.json" ]; then
+    restore_import_generation_file subscriptions.json control || return 1
+  else
+    if [ -e "$CONFIG_DIR/subscriptions.json" ] || [ -L "$CONFIG_DIR/subscriptions.json" ]; then
+      control_only_config_input_is_trusted "$CONFIG_DIR/subscriptions.json" || return 1
+      rm -f "$CONFIG_DIR/subscriptions.json" || return 1
+    fi
+  fi
+  rm -f "$IMPORT_TRANSACTION_FILE" \
+    && [ ! -e "$IMPORT_TRANSACTION_FILE" ] \
+    && [ ! -L "$IMPORT_TRANSACTION_FILE" ] || return 1
+  log_msg "$CONTROL_LOG" \
+    "Recovered the complete canonical configuration generation after an interrupted import."
+}
+
+enable_import_recovery_traps() {
+  trap 'recover_import_generation >/dev/null 2>&1 || true' 0
+  trap 'recover_import_generation >/dev/null 2>&1 || true; exit 129' HUP
+  trap 'recover_import_generation >/dev/null 2>&1 || true; exit 130' INT
+  trap 'recover_import_generation >/dev/null 2>&1 || true; exit 143' TERM
+}
+
+disable_import_recovery_traps() {
+  trap - 0 HUP INT TERM
+}
+
 import_config_b64() {
-  # Stage the complete import before replacing any live file. Decoding directly
-  # to files preserves empty lists and trailing newlines exactly.
+  # Decode and validate every field before publishing any canonical input. The
+  # exact v1 form remains import-compatible; v2 is the current export schema.
   _data_b64="${2:-}"
-  [ -z "$_data_b64" ] && { echo "Missing import data."; return 1; }
+  [ -n "$_data_b64" ] || { echo "Missing import data."; return 1; }
   ensure_config || {
     echo "The live configuration inputs are unsafe; import was refused."
     return 1
   }
   _import_dir="$RUN_DIR/import.$$"
-  rm -rf "$_import_dir"
-  mkdir -p "$_import_dir" || { echo "Failed to create import workspace."; return 1; }
-  if ! printf '%s' "$_data_b64" | base64_decode > "$_import_dir/import.json" 2>/dev/null; then
+  if [ -e "$_import_dir" ] || [ -L "$_import_dir" ]; then
+    echo "The import workspace already exists; import was refused."
+    return 1
+  fi
+  _import_control_uid=$(config_control_uid) || return 1
+  mkdir "$_import_dir" \
+    && chown "$_import_control_uid:0" "$_import_dir" 2>/dev/null \
+    && chmod 0700 "$_import_dir" || {
+      rm -rf "$_import_dir"
+      echo "Failed to create a private import workspace."
+      return 1
+    }
+  if ! printf '%s' "$_data_b64" | base64_decode > "$_import_dir/import.json" 2>/dev/null \
+    || [ ! -s "$_import_dir/import.json" ]; then
     rm -rf "$_import_dir"
     echo "Failed to decode import data."
     return 1
   fi
-  [ -s "$_import_dir/import.json" ] || {
+  _import_schema_regex='^\{"version":(1|2),"config":"[A-Za-z0-9+/]*={0,2}","blocked_names":"[A-Za-z0-9+/]*={0,2}","allowed_names":"[A-Za-z0-9+/]*={0,2}","blocked_ips":"[A-Za-z0-9+/]*={0,2}","allowed_ips":"[A-Za-z0-9+/]*={0,2}","subscriptions":"[A-Za-z0-9+/]*={0,2}"\}$'
+  if [ "$(awk 'END { print NR }' "$_import_dir/import.json" 2>/dev/null)" != 1 ] \
+    || ! grep -Eq "$_import_schema_regex" "$_import_dir/import.json" 2>/dev/null; then
     rm -rf "$_import_dir"
-    echo "Failed to decode import data."
+    echo "Import schema is invalid; expected the exact version 1 or version 2 generation object."
     return 1
-  }
+  fi
 
-  for _field in config blocked_names allowed_names blocked_ips allowed_ips subscriptions; do
-    if ! grep -q "\"$_field\"[[:space:]]*:" "$_import_dir/import.json" 2>/dev/null; then
-      if [ "$_field" = "config" ]; then
-        rm -rf "$_import_dir"
-        echo "Import data is missing the config field."
-        return 1
-      fi
-      continue
-    fi
-    _encoded=$(sed -n "s/.*\"$_field\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" \
-      "$_import_dir/import.json" | head -n 1)
-    if ! printf '%s' "$_encoded" | base64_decode > "$_import_dir/$_field" 2>/dev/null; then
+  for _import_field_spec in \
+    config:dnscrypt-proxy.toml:2097152 \
+    blocked_names:blocked-names.txt:10485760 \
+    allowed_names:allowed-names.txt:10485760 \
+    blocked_ips:blocked-ips.txt:10485760 \
+    allowed_ips:allowed-ips.txt:10485760 \
+    subscriptions:subscriptions.json:1048576
+  do
+    _import_field=${_import_field_spec%%:*}
+    _import_file_and_limit=${_import_field_spec#*:}
+    _import_name=${_import_file_and_limit%%:*}
+    _import_limit=${_import_file_and_limit#*:}
+    _encoded=$(sed -n \
+      "s/^.*\"$_import_field\":\"\([A-Za-z0-9+/=]*\)\".*$/\1/p" \
+      "$_import_dir/import.json")
+    if ! printf '%s' "$_encoded" | base64_decode > "$_import_dir/$_import_name" 2>/dev/null; then
       rm -rf "$_import_dir"
-      echo "Failed to decode import field: $_field"
+      echo "Failed to decode import field: $_import_field"
+      return 1
+    fi
+    _import_size=$(wc -c < "$_import_dir/$_import_name" 2>/dev/null | tr -d ' ')
+    case "$_import_size" in
+      ""|*[!0-9]*) rm -rf "$_import_dir"; echo "Unable to validate import field size: $_import_field"; return 1 ;;
+    esac
+    if [ "$_import_size" -gt "$_import_limit" ]; then
+      rm -rf "$_import_dir"
+      echo "Import field exceeds its safety limit: $_import_field"
       return 1
     fi
   done
-
-  [ -s "$_import_dir/config" ] || {
+  [ -s "$_import_dir/dnscrypt-proxy.toml" ] || {
     rm -rf "$_import_dir"
     echo "Imported configuration is empty."
     return 1
   }
-  enforce_dnscrypt_user "$_import_dir/config" || {
+  if [ -s "$_import_dir/subscriptions.json" ] \
+    && ! subscriptions_json_is_valid "$_import_dir/subscriptions.json"; then
+    rm -rf "$_import_dir"
+    echo "Imported subscriptions do not match the strict URL/enabled schema."
+    return 1
+  fi
+  enforce_dnscrypt_user "$_import_dir/dnscrypt-proxy.toml" || {
     rm -rf "$_import_dir"
     echo "Failed to enforce the dedicated dnscrypt-proxy user."
     return 1
@@ -2764,7 +3034,7 @@ import_config_b64() {
     rm -rf "$_import_dir"
     return 1
   }
-  if ! cat "$_import_dir/config" > "$_import_config_stage" \
+  if ! cat "$_import_dir/dnscrypt-proxy.toml" > "$_import_config_stage" \
     || ! secure_config_temp_valid "$_import_config_stage" "$_import_stage_identity" 600 \
     || ! prepare_secure_config_temp_for_proxy "$_import_config_stage" "$_import_stage_identity"; then
     rm -f "$_import_config_stage"
@@ -2772,82 +3042,118 @@ import_config_b64() {
     echo "Failed to protect the imported configuration."
     return 1
   fi
+  for _import_name in blocked-names.txt allowed-names.txt blocked-ips.txt allowed-ips.txt
+  do
+    prepare_managed_input_for_proxy "$_import_dir/$_import_name" || {
+      rm -f "$_import_config_stage"
+      rm -rf "$_import_dir"
+      echo "Failed to protect imported list: $_import_name"
+      return 1
+    }
+  done
+  if [ -s "$_import_dir/subscriptions.json" ]; then
+    prepare_control_only_input "$_import_dir/subscriptions.json" || {
+      rm -f "$_import_config_stage"
+      rm -rf "$_import_dir"
+      echo "Failed to protect imported subscriptions."
+      return 1
+    }
+  fi
   if ! ensure_binary; then
     rm -f "$_import_config_stage"
     rm -rf "$_import_dir"
-    echo "dnscrypt-proxy is unavailable; the imported configuration was not installed."
+    echo "dnscrypt-proxy is unavailable; the imported generation was not installed."
     return 1
   fi
-  if ! validate_dnscrypt_config "$_import_config_stage" "$CONTROL_LOG" dnscrypt-import-check; then
+  if ! validate_dnscrypt_config "$_import_config_stage" "$CONTROL_LOG" \
+      dnscrypt-import-check "$_import_dir"; then
     rm -f "$_import_config_stage"
     rm -rf "$_import_dir"
-    echo "dnscrypt-proxy rejected the imported configuration ($CONFIG_CHECK_FAILURE)."
+    echo "dnscrypt-proxy rejected the imported generation ($CONFIG_CHECK_FAILURE)."
     return 1
   fi
-  secure_config_temp_valid "$_import_config_stage" "$_import_stage_identity" "$(managed_config_mode)" || {
-    rm -f "$_import_config_stage"
-    rm -rf "$_import_dir"
-    echo "The imported configuration was replaced during validation."
-    return 1
-  }
-
-  _backup=$(create_secure_config_temp 'dnscrypt-proxy.toml.bak.import') || {
-    rm -f "$_import_config_stage"
-    rm -rf "$_import_dir"
-    echo "Failed to create a secure configuration backup."
-    return 1
-  }
-  _import_backup_identity=$(secure_config_temp_identity "$_backup") || {
-    rm -f "$_import_config_stage" "$_backup"
-    rm -rf "$_import_dir"
-    return 1
-  }
-  if ! cat "$CONFIG_FILE" > "$_backup" \
-    || ! secure_config_temp_valid "$_backup" "$_import_backup_identity" 600; then
-    rm -f "$_import_config_stage" "$_backup"
-    rm -rf "$_import_dir"
-    echo "Failed to back up the current configuration."
-    return 1
-  fi
-  prune_config_backups
-  if ! secure_config_temp_valid "$_import_config_stage" "$_import_stage_identity" "$(managed_config_mode)" \
-    || ! mv -f "$_import_config_stage" "$CONFIG_FILE"; then
-    rm -f "$_import_config_stage"
-    rm -rf "$_import_dir"
-    echo "Failed to install imported configuration."
-    return 1
-  fi
-
-  for _field in blocked_names allowed_names blocked_ips allowed_ips; do
-    [ -f "$_import_dir/$_field" ] || continue
-    case "$_field" in
-      blocked_names) _target="$CONFIG_DIR/blocked-names.txt" ;;
-      allowed_names) _target="$CONFIG_DIR/allowed-names.txt" ;;
-      blocked_ips) _target="$CONFIG_DIR/blocked-ips.txt" ;;
-      allowed_ips) _target="$CONFIG_DIR/allowed-ips.txt" ;;
-    esac
-    if ! prepare_managed_input_for_proxy "$_import_dir/$_field" \
-      || ! mv -f "$_import_dir/$_field" "$_target"; then
+  secure_config_temp_valid "$_import_config_stage" "$_import_stage_identity" \
+    "$(managed_config_mode)" || {
+      rm -f "$_import_config_stage"
       rm -rf "$_import_dir"
-      echo "Failed to install imported field: $_field"
+      echo "The imported configuration was replaced during validation."
+      return 1
+    }
+  for _import_name in blocked-names.txt allowed-names.txt blocked-ips.txt allowed-ips.txt
+  do
+    _import_expected_identity=$(managed_config_expected_identity) || return 1
+    [ -f "$_import_dir/$_import_name" ] \
+      && [ ! -L "$_import_dir/$_import_name" ] \
+      && [ "$(stat -c '%u:%g:%a' "$_import_dir/$_import_name" 2>/dev/null)" = \
+        "$_import_expected_identity" ] || {
+          rm -f "$_import_config_stage"
+          rm -rf "$_import_dir"
+          echo "An imported list was replaced during validation."
+          return 1
+        }
+  done
+
+  create_import_generation_backup || {
+    rm -f "$_import_config_stage"
+    rm -rf "$_import_dir"
+    echo "Failed to preserve the complete previous configuration generation."
+    return 1
+  }
+  enable_import_recovery_traps
+  _import_commit_failure=
+  if ! mv -f "$_import_config_stage" "$CONFIG_FILE"; then
+    _import_commit_failure=dnscrypt-proxy.toml
+  fi
+  if [ -z "$_import_commit_failure" ]; then
+    for _import_name in blocked-names.txt allowed-names.txt blocked-ips.txt allowed-ips.txt
+    do
+      if ! mv -f "$_import_dir/$_import_name" "$CONFIG_DIR/$_import_name"; then
+        _import_commit_failure=$_import_name
+        break
+      fi
+    done
+  fi
+  if [ -z "$_import_commit_failure" ]; then
+    if [ -s "$_import_dir/subscriptions.json" ]; then
+      mv -f "$_import_dir/subscriptions.json" "$CONFIG_DIR/subscriptions.json" \
+        || _import_commit_failure=subscriptions.json
+    elif [ -e "$CONFIG_DIR/subscriptions.json" ] \
+      || [ -L "$CONFIG_DIR/subscriptions.json" ]; then
+      control_only_config_input_is_trusted "$CONFIG_DIR/subscriptions.json" \
+        && rm -f "$CONFIG_DIR/subscriptions.json" \
+        || _import_commit_failure=subscriptions.json
+    fi
+  fi
+  if [ -n "$_import_commit_failure" ]; then
+    if recover_import_generation; then
+      disable_import_recovery_traps
+      rm -rf "$_import_dir"
+      echo "Import failed at $_import_commit_failure; the complete previous generation was restored."
       return 1
     fi
-  done
-  if [ -f "$_import_dir/subscriptions" ]; then
-    if [ -s "$_import_dir/subscriptions" ]; then
-      if ! prepare_control_only_input "$_import_dir/subscriptions" \
-        || ! mv -f "$_import_dir/subscriptions" "$CONFIG_DIR/subscriptions.json"; then
-        rm -rf "$_import_dir"
-        echo "Failed to install imported subscriptions."
-        return 1
-      fi
-    else
-      rm -f "$CONFIG_DIR/subscriptions.json"
-    fi
+    disable_import_recovery_traps
+    rm -rf "$_import_dir"
+    echo "Import failed at $_import_commit_failure and rollback_failed; recovery is required."
+    return 3
   fi
+  if ! rm -f "$IMPORT_TRANSACTION_FILE" \
+    || [ -e "$IMPORT_TRANSACTION_FILE" ] || [ -L "$IMPORT_TRANSACTION_FILE" ]; then
+    if recover_import_generation; then
+      disable_import_recovery_traps
+      rm -rf "$_import_dir"
+      echo "Import commit could not be finalized; the complete previous generation was restored."
+      return 1
+    fi
+    disable_import_recovery_traps
+    rm -rf "$_import_dir"
+    echo "Import finalization failed and rollback_failed; recovery is required."
+    return 3
+  fi
+  disable_import_recovery_traps
   rm -rf "$_import_dir"
-  log_msg "$CONTROL_LOG" "Config imported from backup (previous saved as $_backup)"
-  echo "Config imported successfully. Previous config backed up as $_backup"
+  log_msg "$CONTROL_LOG" \
+    "Imported one complete canonical generation; previous generation saved at $IMPORT_BACKUP_DIR."
+  echo "Configuration generation imported. Changes are pending application; previous generation saved at $IMPORT_BACKUP_DIR"
 }
 
 get_subscriptions() {
@@ -2860,8 +3166,124 @@ get_subscriptions() {
   fi
 }
 
+subscriptions_json_to_pairs() {
+  # Parse the deliberately small subscription schema without jq or a host
+  # language. Objects must contain exactly one HTTPS url string and one boolean
+  # enabled field; either field order and ordinary JSON whitespace are allowed.
+  # URL escapes are intentionally rejected because the downloader accepts only
+  # the literal safe-character set below.
+  [ "$#" -eq 1 ] || return 1
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  LC_ALL=C awk '
+    function skip_ws( c) {
+      while (position <= json_length) {
+        c = substr(json, position, 1)
+        if (c != " " && c != "\t" && c != "\r" && c != "\n") break
+        position++
+      }
+    }
+    function take(token, token_length) {
+      token_length = length(token)
+      if (substr(json, position, token_length) != token) return 0
+      position += token_length
+      return 1
+    }
+    function parse_url(start, character, value) {
+      if (!take("\"")) return 0
+      start = position
+      while (position <= json_length) {
+        character = substr(json, position, 1)
+        if (character == "\"") break
+        if (character == "\\" || character == "\t" \
+            || character == "\r" || character == "\n") return 0
+        position++
+      }
+      if (position > json_length) return 0
+      value = substr(json, start, position - start)
+      position++
+      if (value !~ /^https:\/\/[A-Za-z0-9:\/._?=&%~+#@,-]+$/) return 0
+      object_url = value
+      return 1
+    }
+    function parse_enabled() {
+      if (take("true")) object_enabled = "true"
+      else if (take("false")) object_enabled = "false"
+      else return 0
+      return 1
+    }
+    function parse_pair() {
+      skip_ws()
+      if (take("\"url\"")) {
+        if (seen_url) return 0
+        seen_url = 1
+        skip_ws()
+        if (!take(":")) return 0
+        skip_ws()
+        return parse_url()
+      }
+      if (take("\"enabled\"")) {
+        if (seen_enabled) return 0
+        seen_enabled = 1
+        skip_ws()
+        if (!take(":")) return 0
+        skip_ws()
+        return parse_enabled()
+      }
+      return 0
+    }
+    function parse_object() {
+      if (!take("{")) return 0
+      seen_url = 0
+      seen_enabled = 0
+      object_url = ""
+      object_enabled = ""
+      skip_ws()
+      if (!parse_pair()) return 0
+      skip_ws()
+      if (!take(",")) return 0
+      skip_ws()
+      if (!parse_pair()) return 0
+      skip_ws()
+      if (!take("}")) return 0
+      if (!seen_url || !seen_enabled) return 0
+      pairs[++pair_count] = object_url "|" object_enabled
+      return 1
+    }
+    { json = json $0 "\n" }
+    END {
+      json_length = length(json)
+      position = 1
+      skip_ws()
+      if (!take("[")) exit 1
+      skip_ws()
+      if (take("]")) {
+        skip_ws()
+        if (position <= json_length) exit 1
+        exit 0
+      }
+      while (1) {
+        if (!parse_object()) exit 1
+        skip_ws()
+        if (take("]")) break
+        if (!take(",")) exit 1
+        skip_ws()
+      }
+      skip_ws()
+      if (position <= json_length) exit 1
+      for (pair_index = 1; pair_index <= pair_count; pair_index++) {
+        print pairs[pair_index]
+      }
+    }
+  ' "$1"
+}
+
+subscriptions_json_is_valid() {
+  subscriptions_json_to_pairs "$1" >/dev/null 2>&1
+}
+
 save_subscriptions_b64() {
   # Save subscriptions from base64 input
+  [ "$#" -eq 2 ] || { echo "Missing or unexpected subscription data."; return 1; }
   _data_b64="${2:-}"
   [ -z "$_data_b64" ] && { echo "Missing data."; return 1; }
   ensure_config || {
@@ -2874,9 +3296,18 @@ save_subscriptions_b64() {
     echo "Failed to decode subscriptions."
     return 1
   fi
-  if ! grep -Eq '^[[:space:]]*\[.*\][[:space:]]*$' "$_tmp_subscriptions" 2>/dev/null; then
+  _subscriptions_size=$(wc -c < "$_tmp_subscriptions" 2>/dev/null | tr -d ' ')
+  case "$_subscriptions_size" in
+    ""|*[!0-9]*) rm -f "$_tmp_subscriptions"; echo "Unable to validate subscription size."; return 1 ;;
+  esac
+  if [ "$_subscriptions_size" -gt 1048576 ]; then
     rm -f "$_tmp_subscriptions"
-    echo "Subscriptions must be a JSON array."
+    echo "Subscriptions exceed the 1 MiB safety limit."
+    return 1
+  fi
+  if ! subscriptions_json_is_valid "$_tmp_subscriptions"; then
+    rm -f "$_tmp_subscriptions"
+    echo "Subscriptions must be a strict JSON array of HTTPS url/enabled objects."
     return 1
   fi
   if ! prepare_control_only_input "$_tmp_subscriptions" \
@@ -2888,21 +3319,63 @@ save_subscriptions_b64() {
   echo "Subscriptions saved."
 }
 
+list_target_for_kind() {
+  case "$1" in
+    blocked-names) printf '%s\n' "$CONFIG_DIR/blocked-names.txt" ;;
+    allowed-names) printf '%s\n' "$CONFIG_DIR/allowed-names.txt" ;;
+    blocked-ips) printf '%s\n' "$CONFIG_DIR/blocked-ips.txt" ;;
+    allowed-ips) printf '%s\n' "$CONFIG_DIR/allowed-ips.txt" ;;
+    *) return 1 ;;
+  esac
+}
+
+get_list() {
+  [ "$#" -eq 2 ] || { echo "Missing or unexpected list argument."; return 1; }
+  _get_list_target=$(list_target_for_kind "${2:-}") || {
+    echo "Unknown list type."
+    return 1
+  }
+  ensure_config || {
+    echo "The canonical configuration inputs are unsafe; the list was not read."
+    return 1
+  }
+  managed_config_input_is_trusted "$_get_list_target" || {
+    echo "The requested canonical list is unsafe."
+    return 1
+  }
+  cat "$_get_list_target"
+}
+
 save_list_b64() {
   [ "$#" -ge 3 ] || {
     echo "Missing list payload."
     return 1
   }
+  [ "$#" -le 4 ] || {
+    echo "Unexpected list arguments."
+    return 1
+  }
   _list_kind="${2:-}"
   _list_payload="${3:-}"
-  case "$_list_kind" in
-    blocked-names) _list_target="$CONFIG_DIR/blocked-names.txt" ;;
-    allowed-names) _list_target="$CONFIG_DIR/allowed-names.txt" ;;
-    blocked-ips) _list_target="$CONFIG_DIR/blocked-ips.txt" ;;
-    allowed-ips) _list_target="$CONFIG_DIR/allowed-ips.txt" ;;
-    *) echo "Unknown list type."; return 1 ;;
+  _list_commit_mode="${4:-save}"
+  case "$_list_commit_mode" in
+    save|apply) ;;
+    *) echo "Unknown list commit mode."; return 1 ;;
   esac
+  _list_target=$(list_target_for_kind "$_list_kind") || {
+    echo "Unknown list type."
+    return 1
+  }
   ensure_config || return 1
+  _list_was_running=0
+  is_dnscrypt_running && _list_was_running=1
+  if [ "$_list_commit_mode" = apply ] && [ "$_list_was_running" -eq 1 ]; then
+    _list_generation_state=$(config_apply_state 2>/dev/null || true)
+    if [ "$_list_generation_state" != applied ]; then
+      echo "List apply was refused because the canonical generation already has pending or unavailable changes; restart or restore it first."
+      return 1
+    fi
+  fi
   _list_tmp="$RUN_DIR/list.$$.new"
   if ! printf '%s' "$_list_payload" | base64_decode > "$_list_tmp" 2>/dev/null; then
     rm -f "$_list_tmp"
@@ -2923,13 +3396,76 @@ save_list_b64() {
     echo "Failed to set list permissions."
     return 1
   }
+  _list_backup=
+  if [ "$_list_commit_mode" = apply ] && [ "$_list_was_running" -eq 1 ]; then
+    _list_backup=$(create_secure_config_temp ".list-backup.$_list_kind") || {
+      rm -f "$_list_tmp"
+      echo "Failed to preserve the current working list."
+      return 1
+    }
+    _list_backup_identity=$(secure_config_temp_identity "$_list_backup") || {
+      rm -f "$_list_tmp" "$_list_backup"
+      return 1
+    }
+    if ! cat "$_list_target" > "$_list_backup" \
+      || ! secure_config_temp_valid "$_list_backup" "$_list_backup_identity" 600 \
+      || ! prepare_managed_input_for_proxy "$_list_backup"; then
+      rm -f "$_list_tmp" "$_list_backup"
+      echo "Failed to protect the current working list backup."
+      return 1
+    fi
+  fi
   mv -f "$_list_tmp" "$_list_target" || {
     rm -f "$_list_tmp"
+    [ -z "$_list_backup" ] || rm -f "$_list_backup"
     echo "Failed to install the list."
     return 1
   }
+  if [ "$_list_commit_mode" = apply ] && [ "$_list_was_running" -eq 1 ]; then
+    if restart_service >> "$CONTROL_LOG" 2>&1; then
+      rm -f "$_list_backup"
+      log_msg "$CONTROL_LOG" "Saved and applied $_list_kind list ($_list_size bytes)."
+      echo "List saved and applied by a successful service restart."
+      return 0
+    fi
+    _list_rollback_ok=0
+    _list_restore_installed=0
+    if [ -n "$_list_backup" ] \
+      && mv -f "$_list_backup" "$_list_target"; then
+      _list_restore_installed=1
+      if start_service >> "$CONTROL_LOG" 2>&1; then
+        _list_rollback_ok=1
+      fi
+    fi
+    if [ "$_list_rollback_ok" -eq 1 ]; then
+      log_msg "$CONTROL_LOG" \
+        "Rejected $_list_kind list application; previous working list was restored."
+      echo "List application failed; the previous working list was restored."
+      return 1
+    fi
+    if [ "$_list_restore_installed" -eq 0 ] \
+      && secure_config_temp_valid "$_list_backup" "$_list_backup_identity" \
+        "$(managed_config_mode)"; then
+      log_msg "$CONTROL_LOG" \
+        "Rejected $_list_kind list application and rollback_failed; working list backup preserved at $_list_backup."
+      echo "List application failed and rollback_failed; working list backup preserved at $_list_backup."
+    elif [ "$_list_restore_installed" -eq 1 ]; then
+      log_msg "$CONTROL_LOG" \
+        "Rejected $_list_kind list application; previous canonical list was restored, but service restart rollback_failed."
+      echo "List application failed; the previous canonical list was restored, but service restart rollback_failed."
+    else
+      log_msg "$CONTROL_LOG" \
+        "Rejected $_list_kind list application and rollback_failed; recovery is required."
+      echo "List application failed and rollback_failed; recovery is required."
+    fi
+    return 3
+  fi
   log_msg "$CONTROL_LOG" "Saved $_list_kind list ($_list_size bytes)."
-  echo "List saved."
+  if [ "$_list_commit_mode" = apply ]; then
+    echo "List saved; the service is stopped, so changes will apply on the next start."
+  else
+    echo "List saved; changes are pending application."
+  fi
 }
 
 apply_subscriptions() {
@@ -2939,7 +3475,6 @@ apply_subscriptions() {
     return 1
   }
   [ ! -f "$CONFIG_DIR/subscriptions.json" ] && { echo "No subscriptions configured."; return 0; }
-  # Parse JSON subscriptions (simple line-based extraction for busybox)
   _subs_file="$CONFIG_DIR/subscriptions.json"
   _merged="$CONFIG_DIR/blocked-names.txt"
   _begin_marker='## BEGIN dnscrypt-proxy-root managed subscriptions'
@@ -2949,23 +3484,12 @@ apply_subscriptions() {
   _generated_file="$RUN_DIR/subscription-generated.$$"
   _user_file="$RUN_DIR/subscription-user.$$"
   _final_file="$RUN_DIR/subscription-final.$$"
-  # Parse JSON object-by-object so url/enabled always come from the same entry,
-  # regardless of field order. Uses RS/RSTART/RLENGTH only, which busybox awk
-  # supports (the 3-argument match() capture form does not exist there).
-  awk '
-    BEGIN { RS="}" }
-    {
-      url=""; enabled="false"
-      if (match($0, /"url"[ \t]*:[ \t]*"[^"]*"/)) {
-        s = substr($0, RSTART, RLENGTH)
-        sub(/^"url"[ \t]*:[ \t]*"/, "", s)
-        sub(/"$/, "", s)
-        url = s
-      }
-      if ($0 ~ /"enabled"[ \t]*:[ \t]*true/) enabled="true"
-      if (url != "") print url "|" enabled
-    }
-  ' "$_subs_file" > "$_pairs_file"
+  if ! subscriptions_json_to_pairs "$_subs_file" > "$_pairs_file"; then
+    rm -f "$_pairs_file" "$_download_file" "$_generated_file" \
+      "$_user_file" "$_final_file"
+    echo "Subscriptions do not match the strict URL/enabled schema."
+    return 1
+  fi
   printf '%s\n' "$_begin_marker" > "$_generated_file"
   printf '## Auto-generated from subscriptions on %s\n' "$(date +%Y-%m-%d)" >> "$_generated_file"
   _i=0
@@ -3236,19 +3760,38 @@ leak_test() {
     "$_status" "$_matched" "$_json_domains"
 }
 
+if [ -e "$IMPORT_TRANSACTION_FILE" ] || [ -L "$IMPORT_TRANSACTION_FILE" ]; then
+  acquire_action_control_lock
+  _recovery_lock_status=$?
+  case "$_recovery_lock_status" in
+    0) ;;
+    2)
+      echo "Another dnscrypt-proxy control operation is recovering configuration."
+      exit 2
+      ;;
+    *)
+      echo "Failed to lock interrupted configuration recovery."
+      exit 1
+      ;;
+  esac
+  if ! recover_import_generation; then
+    echo "An interrupted configuration import could not be recovered safely."
+    exit 1
+  fi
+  # The updater deliberately takes the control lock only for its short commit
+  # phase. Do not retain this recovery-only lock across its network/check phase.
+  case "$ACTION" in
+    update|check-update|auto-update)
+      exec 8>&-
+      CONTROL_LOCK_ACQUIRED=0
+      ;;
+  esac
+fi
+
 case "$ACTION" in
   start|stop|restart|apply-iptables|remove-iptables|set-dns-mode|get-config|save-config-b64|set-resolvers|quick-mode|import-config-b64|save-list-b64|save-subscriptions-b64|apply-subscriptions)
-    if [ "${DNSCRYPT_CONTROL_LOCK_HELD:-0}" = "1" ]; then
-      inherited_control_lock_valid
-      _control_lock_status=$?
-      if [ "$_control_lock_status" -ne 0 ]; then
-        echo "The inherited dnscrypt-proxy control lock is invalid."
-        exit 1
-      fi
-    else
-      acquire_control_lock
-      _control_lock_status=$?
-    fi
+    acquire_action_control_lock
+    _control_lock_status=$?
     case "$_control_lock_status" in
       0) ;;
       2)
@@ -3256,7 +3799,11 @@ case "$ACTION" in
         exit 2
         ;;
       *)
-        echo "Failed to acquire the dnscrypt-proxy control lock."
+        if [ "${DNSCRYPT_CONTROL_LOCK_HELD:-0}" = "1" ]; then
+          echo "The inherited dnscrypt-proxy control lock is invalid."
+        else
+          echo "Failed to acquire the dnscrypt-proxy control lock."
+        fi
         exit 1
         ;;
     esac
@@ -3301,11 +3848,12 @@ case "$ACTION" in
   export-config) export_config ;;
   import-config-b64) import_config_b64 "$@" ;;
   get-subscriptions) get_subscriptions ;;
+  get-list) get_list "$@" ;;
   save-list-b64) save_list_b64 "$@" ;;
   save-subscriptions-b64) save_subscriptions_b64 "$@" ;;
   apply-subscriptions) apply_subscriptions ;;
   *)
-    echo "Usage: $0 {start|stop|shutdown-stop|restart|status|health|service-state|probe-upstream|apply-iptables|remove-iptables|get-dns-mode|set-dns-mode|update|check-update|auto-update|get-config|save-config-b64|save-list-b64|logs|query-stats|dns-test|leak-test|list-resolvers|set-resolvers|ping-resolver|ping-all|protocol-status|quick-mode|get-mode|export-config|import-config-b64|get-subscriptions|save-subscriptions-b64|apply-subscriptions}"
+    echo "Usage: $0 {start|stop|shutdown-stop|restart|status|health|service-state|probe-upstream|apply-iptables|remove-iptables|get-dns-mode|set-dns-mode|update|check-update|auto-update|get-config|save-config-b64|get-list|save-list-b64|logs|query-stats|dns-test|leak-test|list-resolvers|set-resolvers|ping-resolver|ping-all|protocol-status|quick-mode|get-mode|export-config|import-config-b64|get-subscriptions|save-subscriptions-b64|apply-subscriptions}"
     exit 1
     ;;
 esac

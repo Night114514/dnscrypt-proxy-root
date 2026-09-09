@@ -96,6 +96,12 @@ jobs:
       - name: Run WebUI bridge tests
         run: node tests/test-webui-bridge.js
 
+      - name: Run v0.9.2 release contract
+        run: node tests/test-v092-release.js
+
+      - name: Verify generated WebUI is reproducible
+        run: node webui/build.mjs --check
+
       - name: Run updater tests with dash
         run: env DNSCRYPT_UPDATE_INTERVAL_SECONDS=0 TEST_SHELL_KIND=dash dash tests/test-update-dnscrypt.sh
 

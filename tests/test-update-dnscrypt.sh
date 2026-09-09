@@ -824,6 +824,9 @@ test_term_signal_stops_update_and_cleans_lock() {
   make_old_install
   MOCK_METADATA_MODE=wait-success
   export MOCK_METADATA_MODE
+  UNRELATED_WORKSPACE="$MODULE_DIR/tmp/update-unrelated"
+  mkdir -p "$UNRELATED_WORKSPACE" || return 1
+  printf '%s\n' preserve-me > "$UNRELATED_WORKSPACE/sentinel"
 
   start_update_in_background "$CASE_DIR/signaled-update.out" force
   SIGNALED_PID=$UPDATE_PID
@@ -831,6 +834,13 @@ test_term_signal_stops_update_and_cleans_lock() {
     kill -TERM "$SIGNALED_PID" 2>/dev/null || true
     return 1
   }
+  assert_exists "$MODULE_DIR/tmp/update-$SIGNALED_PID" \
+    'the updater did not create the process-owned workspace expected by this test' || {
+      kill -TERM "$SIGNALED_PID" 2>/dev/null || true
+      : > "$MOCK_WAIT_RELEASE"
+      wait "$SIGNALED_PID" 2>/dev/null || true
+      return 1
+    }
 
   kill -TERM "$SIGNALED_PID"
   : > "$MOCK_WAIT_RELEASE"
@@ -842,6 +852,12 @@ test_term_signal_stops_update_and_cleans_lock() {
   assert_not_exists "$MODULE_DIR/run/last-update-check" 'a signaled metadata request must not start cooldown' || return 1
   assert_old_binary_preserved "$MODULE_DIR/bin/dnscrypt-proxy" \
     'a signaled updater continued into installation' || return 1
+  assert_not_exists "$MODULE_DIR/tmp/update-$SIGNALED_PID" \
+    'a signaled updater left its process-owned workspace behind' || return 1
+  assert_exists "$UNRELATED_WORKSPACE/sentinel" \
+    'a signaled updater removed an unrelated sibling workspace' || return 1
+  assert_eq preserve-me "$(cat "$UNRELATED_WORKSPACE/sentinel")" \
+    'a signaled updater changed an unrelated sibling workspace' || return 1
 }
 
 test_owned_lock_is_cleaned_on_failure() {

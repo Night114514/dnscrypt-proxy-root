@@ -48,6 +48,7 @@ LOCK_OWNED=0
 LOCK_FD_OPEN=0
 CONTROL_LOCK_FD_OPEN=0
 RUNTIME_CANDIDATE_BIN=
+WORK=
 
 # Called indirectly by the signal and exit traps below.
 # shellcheck disable=SC2317
@@ -55,6 +56,16 @@ finish() {
   if [ -n "$RUNTIME_CANDIDATE_BIN" ]; then
     rm -f "$RUNTIME_CANDIDATE_BIN"
     RUNTIME_CANDIDATE_BIN=
+  fi
+  if [ -n "$WORK" ]; then
+    case "$WORK" in
+      "$TMP_BASE/update-$$")
+        if [ -d "$WORK" ] && [ ! -L "$WORK" ]; then
+          rm -rf "$WORK"
+        fi
+        ;;
+    esac
+    WORK=
   fi
   if [ "$LOCK_OWNED" -eq 1 ]; then
     lock_owner=$(cat "$LOCK_FILE" 2>/dev/null || true)

@@ -25,6 +25,10 @@ case " $* " in
         *) exit 1 ;;
       esac
     fi
+    if [ -n "${MOCK_DAEMON_REQUIRE_IMPORTED_ALLOWED:-}" ]; then
+      grep -Fx "$MOCK_DAEMON_REQUIRE_IMPORTED_ALLOWED" \
+        "${config_argument%/*}/allowed-names.txt" >/dev/null 2>&1 || exit 91
+    fi
     case "${MOCK_DAEMON_START_MODE:-success}" in
       config_error)
         printf '%s\n' 'Unsupported key in configuration file: [invalid_mock_key]' >&2
@@ -112,6 +116,11 @@ case " $* " in
 esac
 
 printf 'daemon-start %s\n' "$config_argument" >> "$MOCK_CALL_LOG"
+if [ -n "${MOCK_DAEMON_REJECT_ALLOWED_ON_START:-}" ] \
+  && grep -Fx "$MOCK_DAEMON_REJECT_ALLOWED_ON_START" \
+    "${DNSCRYPT_RUNTIME_ROOT:-$MODULE_DIR}/active/allowed-names.txt" >/dev/null 2>&1; then
+  exit 72
+fi
 case "${MOCK_DAEMON_START_MODE:-success}" in
   config_error|missing_cache_key|source_cache_error|check_timeout|check_shutdown|check_pid_reuse) exit 70 ;;
   exit)

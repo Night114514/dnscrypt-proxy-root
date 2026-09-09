@@ -34,6 +34,10 @@ mock_runtime_identity() {
     "$MOCK_RUNTIME_PARENT")
       printf '%s:%s\n' "${MOCK_RUNTIME_PARENT_UID:-0}" "${MOCK_RUNTIME_PARENT_GID:-0}"
       ;;
+    "$MOCK_RUNTIME_ROOT/config/"*)
+      mock_state_value "$MOCK_CHOWN_STATE" "$mock_identity_path" \
+        || printf '%s\n' '0:0'
+      ;;
     "$MOCK_RUNTIME_ROOT"|"$MOCK_RUNTIME_ROOT/"*|\
     "$MOCK_RUNTIME_ROOT.creating"|"$MOCK_RUNTIME_ROOT.creating/"*|\
     "$MOCK_RUNTIME_ROOT.removing"|"$MOCK_RUNTIME_ROOT.removing/"*)

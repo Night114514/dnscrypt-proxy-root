@@ -1,0 +1,13 @@
+{
+  "name": "dnscrypt-proxy-root-webui",
+  "version": "0.9.2",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "check": "node build.mjs --check",
+    "test": "node ../tests/test-webui-bridge.js"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
