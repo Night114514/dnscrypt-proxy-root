@@ -10,6 +10,14 @@ IMPORT_TRANSACTION_FILE="$RUN_DIR/config-import.transaction"
 IMPORT_BACKUP_DIR="$RUN_DIR/config-generation-backup"
 CONTROL_LOCK_ACQUIRED=0
 
+# Backend resource budgets (decoded bytes); keep transport policy separate.
+CONFIG_MAX_BYTES=65536
+SUBSCRIPTION_MAX_ENABLED=32
+SUBSCRIPTION_DOWNLOAD_MAX_BYTES=10485760
+SUBSCRIPTION_TOTAL_MAX_BYTES=33554432
+SUBSCRIPTION_GENERATED_MAX_BYTES=33554432
+SUBSCRIPTION_FINAL_MAX_BYTES=33554432
+
 # Millisecond timestamp. toybox's date lacks %N and echoes the literal "%N",
 # so fall back to second precision when nanoseconds are unavailable.
 _now_ms() {
@@ -233,81 +241,16 @@ ensure_config() {
       rm -f "$_ensure_config_tmp"
       return 1
     }
-    cat > "$_ensure_config_tmp" <<'EOF'
-listen_addresses = ['127.0.0.1:5354']
-user_name = '3003'
-server_names = ['cloudflare', 'quad9-dnscrypt-ip4-filter-pri']
-max_clients = 250
-ipv4_servers = true
-ipv6_servers = false
-dnscrypt_servers = true
-doh_servers = true
-odoh_servers = false
-require_dnssec = true
-require_nolog = true
-require_nofilter = false
-force_tcp = false
-timeout = 5000
-keepalive = 30
-cert_refresh_delay = 240
-bootstrap_resolvers = ['9.9.9.9:53', '149.112.112.112:53', '1.1.1.1:53']
-ignore_system_dns = true
-netprobe_timeout = 60
-netprobe_address = '9.9.9.9:53'
-log_level = 2
-use_syslog = false
-
-[query_log]
-  file = '../data/query.log'
-  format = 'tsv'
-
-[nx_log]
-  file = '../data/nx.log'
-  format = 'tsv'
-
-[blocked_names]
-  blocked_names_file = 'blocked-names.txt'
-
-[allowed_names]
-  allowed_names_file = 'allowed-names.txt'
-
-[blocked_ips]
-  blocked_ips_file = 'blocked-ips.txt'
-
-[allowed_ips]
-  allowed_ips_file = 'allowed-ips.txt'
-
-[sources]
-  [sources.'public-resolvers']
-  urls = ['https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/public-resolvers.md', 'https://download.dnscrypt.info/resolvers-list/v3/public-resolvers.md']
-  cache_file = '../data/public-resolvers.md'
-  minisign_key = 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3'
-  refresh_delay = 73
-  prefix = ''
-
-  [sources.'relays']
-  urls = ['https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/relays.md', 'https://download.dnscrypt.info/resolvers-list/v3/relays.md', 'https://cdn.jsdelivr.net/gh/DNSCrypt/dnscrypt-resolvers@master/v3/relays.md']
-  cache_file = '../data/relays.md'
-  minisign_key = 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3'
-  refresh_delay = 73
-  prefix = ''
-
-  [sources.'odoh-servers']
-  urls = ['https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/odoh-servers.md', 'https://download.dnscrypt.info/resolvers-list/v3/odoh-servers.md']
-  cache_file = '../data/odoh-servers.md'
-  minisign_key = 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3'
-  refresh_delay = 73
-  prefix = ''
-
-  [sources.'odoh-relays']
-  urls = ['https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/odoh-relays.md', 'https://download.dnscrypt.info/resolvers-list/v3/odoh-relays.md']
-  cache_file = '../data/odoh-relays.md'
-  minisign_key = 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3'
-  refresh_delay = 73
-  prefix = ''
-
-[static]
-EOF
+    # The installed module template is the sole default source of truth.
+    if ! module_runtime_templates_are_trusted \
+      || ! cat "$MODULE_CONFIG_DIR/dnscrypt-proxy.toml" > "$_ensure_config_tmp" \
+      || ! enforce_dnscrypt_user "$_ensure_config_tmp" \
+      || ! config_module_listener_is_safe "$_ensure_config_tmp" \
+      || ! config_root_open_paths_are_safe "$_ensure_config_tmp" \
+      || ! config_runtime_user_is_safe "$_ensure_config_tmp"; then
+      rm -f "$_ensure_config_tmp"
+      return 1
+    fi
     if ! secure_config_temp_valid "$_ensure_config_tmp" "$_ensure_config_identity" 600 \
       || ! prepare_secure_config_temp_for_proxy "$_ensure_config_tmp" "$_ensure_config_identity" \
       || ! secure_config_temp_valid "$_ensure_config_tmp" "$_ensure_config_identity" "$(managed_config_mode)" \
@@ -1090,6 +1033,32 @@ classify_start_failure_since() {
   printf '%s\n' "$_classified_failure"
 }
 
+config_module_listener_is_safe() {
+  # Accept one single-line root assignment. The firewall, readiness and probes
+  # share DEFAULT_LISTEN. The existing root-path parser also rejects ambiguous
+  # TOML, including quoted root keys and multiline strings, before daemon use.
+  awk -v wanted="$DEFAULT_LISTEN" '
+    BEGIN { root=1; count=0; bad=0; sq=sprintf("%c",39); dq=sprintf("%c",34) }
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*\[/ { root=0 }
+    /^[[:space:]]*listen_addresses[[:space:]]*=/ {
+      count++
+      if (!root) bad=1
+      value=$0
+      sub(/^[^=]*=[[:space:]]*/, "", value)
+      sub(/[[:space:]]*#.*/, "", value)
+      sub(/[[:space:]]*$/, "", value)
+      if (value !~ /^\[[[:space:]]*.*[[:space:]]*\]$/) { bad=1; next }
+      sub(/^\[[[:space:]]*/, "", value)
+      sub(/[[:space:]]*\]$/, "", value)
+      sub(/,[[:space:]]*$/, "", value)
+      sub(/[[:space:]]*$/, "", value)
+      if (value != sq wanted sq && value != dq wanted dq) bad=1
+    }
+    END { exit (bad || count!=1) ? 1 : 0 }
+  ' "$1"
+}
+
 validate_dnscrypt_config() {
   _validate_config_path="$1"
   _validate_log_path="$2"
@@ -1097,6 +1066,11 @@ validate_dnscrypt_config() {
   _validate_list_source="${4:-$CONFIG_DIR}"
   case "$_validate_marker_prefix" in ""|*[!A-Za-z0-9_-]*) return 1 ;; esac
   CONFIG_CHECK_FAILURE=none
+  if ! config_module_listener_is_safe "$_validate_config_path"; then
+    CONFIG_CHECK_FAILURE=listener_contract_invalid
+    log_msg "$_validate_log_path" "Module configuration requires exactly one listener: $DEFAULT_LISTEN."
+    return 1
+  fi
   _validate_marker="$_validate_marker_prefix=$$-$(date +%s 2>/dev/null || echo 0)"
   log_msg "$_validate_log_path" "$_validate_marker"
   run_bounded_config_check "$_validate_config_path" "$_validate_log_path" \
@@ -1952,6 +1926,12 @@ save_config_b64() {
     rm -f "$tmp"
     return 1
   }
+  _save_decoded_size=$(wc -c < "$tmp") || { rm -f "$tmp"; return 1; }
+  if [ "$_save_decoded_size" -gt "$CONFIG_MAX_BYTES" ]; then
+    rm -f "$tmp"
+    echo "Decoded configuration exceeds the $CONFIG_MAX_BYTES byte size limit."
+    return 1
+  fi
   enforce_dnscrypt_user "$tmp" || {
     echo "Failed to enforce the dedicated dnscrypt-proxy user."
     rm -f "$tmp"
@@ -2979,7 +2959,7 @@ import_config_b64() {
   fi
 
   for _import_field_spec in \
-    config:dnscrypt-proxy.toml:2097152 \
+    config:dnscrypt-proxy.toml:$CONFIG_MAX_BYTES \
     blocked_names:blocked-names.txt:10485760 \
     allowed_names:allowed-names.txt:10485760 \
     blocked_ips:blocked-ips.txt:10485760 \
@@ -3468,6 +3448,17 @@ save_list_b64() {
   fi
 }
 
+cleanup_subscription_transaction() {
+  rm -f "$_pairs_file" "$_download_file" "$_generated_file" \
+    "$_user_file" "$_final_file"
+}
+
+subscription_file_within_limit() {
+  _subs_size=$(wc -c < "$1") || return 1
+  case "$_subs_size" in ""|*[!0-9]*) return 1 ;; esac
+  [ "$_subs_size" -le "$2" ]
+}
+
 apply_subscriptions() {
   # Download all enabled subscription lists and merge into blocked-names.txt
   ensure_config || {
@@ -3484,15 +3475,41 @@ apply_subscriptions() {
   _generated_file="$RUN_DIR/subscription-generated.$$"
   _user_file="$RUN_DIR/subscription-user.$$"
   _final_file="$RUN_DIR/subscription-final.$$"
+  _subs_was_running=0
+  is_dnscrypt_running && _subs_was_running=1
+  _subs_backup=$(create_secure_config_temp '.subscription-backup') || return 1
+  _subs_backup_identity=$(secure_config_temp_identity "$_subs_backup") || {
+    rm -f "$_subs_backup"
+    return 1
+  }
+  if ! managed_config_input_is_trusted "$_merged" \
+    || ! cat "$_merged" > "$_subs_backup" \
+    || ! prepare_secure_config_temp_for_proxy "$_subs_backup" "$_subs_backup_identity"; then
+    rm -f "$_subs_backup"
+    return 1
+  fi
   if ! subscriptions_json_to_pairs "$_subs_file" > "$_pairs_file"; then
+    rm -f "$_subs_backup"
     rm -f "$_pairs_file" "$_download_file" "$_generated_file" \
       "$_user_file" "$_final_file"
     echo "Subscriptions do not match the strict URL/enabled schema."
     return 1
   fi
-  printf '%s\n' "$_begin_marker" > "$_generated_file"
-  printf '## Auto-generated from subscriptions on %s\n' "$(date +%Y-%m-%d)" >> "$_generated_file"
+  _subs_enabled=$(awk -F '|' '$2=="true" { n++ } END { print n+0 }' "$_pairs_file")
+  if [ "$_subs_enabled" -gt "$SUBSCRIPTION_MAX_ENABLED" ]; then
+    cleanup_subscription_transaction
+    rm -f "$_subs_backup"
+    echo "Enabled subscription count exceeds the $SUBSCRIPTION_MAX_ENABLED limit; previous blocklist kept."
+    return 1
+  fi
+  if ! printf '%s\n' "$_begin_marker" > "$_generated_file" \
+    || ! printf '## Auto-generated from subscriptions on %s\n' "$(date +%Y-%m-%d)" >> "$_generated_file"; then
+    cleanup_subscription_transaction
+    rm -f "$_subs_backup"
+    return 1
+  fi
   _i=0
+  _subs_total=0
   _download_failed=0
   while IFS='|' read -r _url _en; do
     [ "$_en" = "true" ] || continue
@@ -3516,23 +3533,36 @@ apply_subscriptions() {
     case "$_download_size" in
       ""|*[!0-9]*) _download_failed=1; break ;;
     esac
-    if [ "$_download_size" -gt 10485760 ]; then
-      log_msg "$CONTROL_LOG" "Subscription $_i exceeds the 10 MiB size limit."
+    _subs_total=$((_subs_total + _download_size))
+    if [ "$_download_size" -gt "$SUBSCRIPTION_DOWNLOAD_MAX_BYTES" ] \
+      || [ "$_subs_total" -gt "$SUBSCRIPTION_TOTAL_MAX_BYTES" ]; then
+      log_msg "$CONTROL_LOG" "Subscription $_i exceeds the individual or cumulative download size limit."
       _download_failed=1
       break
     fi
-    printf '# subscription-%d: %s\n' "$_i" "$_url" >> "$_generated_file"
-    awk '{ sub(/\r$/, ""); if ($0 !~ /^[[:space:]]*($|#|!)/) print }' \
-      "$_download_file" >> "$_generated_file"
+    if ! printf '# subscription-%d: %s\n' "$_i" "$_url" >> "$_generated_file" \
+      || ! awk '{ sub(/\r$/, ""); if ($0 !~ /^[[:space:]]*($|#|!)/) print }' \
+        "$_download_file" >> "$_generated_file" \
+      || ! subscription_file_within_limit "$_generated_file" "$SUBSCRIPTION_GENERATED_MAX_BYTES"; then
+      _download_failed=1
+      break
+    fi
   done < "$_pairs_file"
   rm -f "$_pairs_file" "$_download_file"
 
   if [ "$_download_failed" -ne 0 ]; then
+    rm -f "$_subs_backup"
     rm -f "$_generated_file" "$_user_file" "$_final_file"
     echo "Failed to apply subscriptions; the previous blocklist was kept."
     return 1
   fi
-  printf '%s\n' "$_end_marker" >> "$_generated_file"
+  if ! printf '%s\n' "$_end_marker" >> "$_generated_file" \
+    || ! subscription_file_within_limit "$_generated_file" "$SUBSCRIPTION_GENERATED_MAX_BYTES"; then
+    cleanup_subscription_transaction
+    rm -f "$_subs_backup"
+    echo "Generated subscriptions exceed the size limit or could not be written; previous blocklist kept."
+    return 1
+  fi
 
   # Preserve manual rules outside the managed section. For the legacy format,
   # the old auto-generated header always began a tail section, so discard that
@@ -3543,29 +3573,55 @@ apply_subscriptions() {
     !managed && /^## Auto-generated from subscriptions on / { legacy=1; next }
     managed || legacy { next }
     { print }
-  ' "$_merged" 2>/dev/null > "$_user_file"
-  : > "$_final_file"
-  if [ -s "$_user_file" ]; then
-    cat "$_user_file" >> "$_final_file"
-    printf '\n' >> "$_final_file"
-  fi
-  cat "$_generated_file" >> "$_final_file"
-  if ! prepare_managed_input_for_proxy "$_final_file" \
+  ' "$_subs_backup" 2>/dev/null > "$_user_file" || {
+    cleanup_subscription_transaction
+    rm -f "$_subs_backup"
+    return 1
+  }
+  # Stage beside the canonical list so rename cannot become a cross-device copy.
+  _final_file=$(create_secure_config_temp '.subscription-final') || {
+    cleanup_subscription_transaction
+    rm -f "$_subs_backup"
+    return 1
+  }
+  _subs_final_identity=$(secure_config_temp_identity "$_final_file") || {
+    cleanup_subscription_transaction
+    rm -f "$_subs_backup"
+    return 1
+  }
+  if ! (cat "$_user_file" && { [ ! -s "$_user_file" ] || printf '\n'; } \
+        && cat "$_generated_file") > "$_final_file" \
+    || ! subscription_file_within_limit "$_final_file" "$SUBSCRIPTION_FINAL_MAX_BYTES" \
+    || ! prepare_secure_config_temp_for_proxy "$_final_file" "$_subs_final_identity" \
+    || ! secure_config_temp_valid "$_final_file" "$_subs_final_identity" "$(managed_config_mode)" \
     || ! mv -f "$_final_file" "$_merged"; then
     rm -f "$_generated_file" "$_user_file" "$_final_file"
-    echo "Failed to install the merged subscription blocklist."
+    rm -f "$_subs_backup"
+    echo "Merged subscription blocklist exceeds the size limit or could not be installed."
     return 1
   fi
   rm -f "$_generated_file" "$_user_file"
   _count=$(awk '$0 !~ /^[[:space:]]*($|#)/ { count++ } END { print count + 0 }' "$_merged" 2>/dev/null)
   _count=${_count:-0}
-  if is_dnscrypt_running; then
+  if [ "$_subs_was_running" -eq 1 ]; then
     if ! restart_service >/dev/null 2>&1; then
-      log_msg "$CONTROL_LOG" "Subscriptions were saved, but dnscrypt-proxy failed to restart."
-      echo "Subscriptions were saved, but dnscrypt-proxy failed to restart."
-      return 1
+      if secure_config_temp_valid "$_subs_backup" "$_subs_backup_identity" "$(managed_config_mode)" \
+        && mv -f "$_subs_backup" "$_merged"; then
+        if start_service >> "$CONTROL_LOG" 2>&1; then
+          echo "Subscription application failed; previous blocklist and service restored."
+          return 1
+        fi
+        log_msg "$CONTROL_LOG" "Subscription rollback_failed: previous canonical blocklist was restored; service recovery required."
+        echo "Subscription rollback_failed: previous canonical blocklist was restored; service recovery required."
+        return 3
+      fi
+      # Preserve an uninstalled trusted backup for manual recovery.
+      log_msg "$CONTROL_LOG" "Subscription rollback_failed; recovery required. Backup: $_subs_backup"
+      echo "Subscription rollback_failed; recovery required. Previous list backup: $_subs_backup"
+      return 3
     fi
   fi
+  rm -f "$_subs_backup"
   log_msg "$CONTROL_LOG" "Subscriptions applied: $_count active entries in blocked-names.txt"
   echo "Subscriptions applied. Total entries: $_count"
 }
