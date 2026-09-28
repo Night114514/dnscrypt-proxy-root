@@ -24,6 +24,7 @@ find_host_tool() {
 
 HOST_SH=$(find_host_tool sh 2>/dev/null || true)
 HOST_DASH=$(find_host_tool dash 2>/dev/null || true)
+HOST_MKSH=$(find_host_tool mksh 2>/dev/null || true)
 HOST_BUSYBOX=$(find_host_tool busybox 2>/dev/null || true)
 HOST_MV=$(find_host_tool mv 2>/dev/null || true)
 HOST_READLINK=$(find_host_tool readlink 2>/dev/null || true)
@@ -65,6 +66,12 @@ case "$TEST_SHELL_KIND" in
   dash)
     [ -n "$HOST_DASH" ] || {
       echo "dash is required for TEST_SHELL_KIND=dash" >&2
+      exit 2
+    }
+    ;;
+  mksh)
+    [ -n "$HOST_MKSH" ] || {
+      echo "mksh is required for TEST_SHELL_KIND=mksh" >&2
       exit 2
     }
     ;;
@@ -139,6 +146,7 @@ run_test_shell_with_path() {
   case "$TEST_SHELL_KIND" in
     sh) "$HOST_ENV" PATH="$TEST_PATH_VALUE" "$HOST_SH" "$@" ;;
     dash) "$HOST_ENV" PATH="$TEST_PATH_VALUE" "$HOST_DASH" "$@" ;;
+    mksh) "$HOST_ENV" PATH="$TEST_PATH_VALUE" "$HOST_MKSH" "$@" ;;
     busybox-ash) "$HOST_ENV" PATH="$TEST_PATH_VALUE" MOCK_COMMAND_DIR="$TEST_PATH_VALUE" "$HOST_BUSYBOX" ash "$@" ;;
   esac
 }
@@ -197,7 +205,7 @@ setup_fixture() {
     chmod 0600 "$MODULE_DIR/config/$MANAGED_LIST"
   done
 
-  for FIXTURE_TOOL in awk cat chmod cmp cp flock grep head ln mkdir mv readlink rm rmdir sed sh sleep stat timeout tr wc; do
+  for FIXTURE_TOOL in printf awk cat chmod cmp cp flock grep head ln mkdir mv readlink rm rmdir sed sh sleep stat timeout tr wc; do
     link_host_tool "$FIXTURE_TOOL" || return 1
   done
 
@@ -279,6 +287,13 @@ run_update() {
   case "$TEST_SHELL_KIND" in
     sh) "$HOST_ENV" PATH="$TOOL_BIN" "$HOST_SH" "$MODULE_DIR/scripts/update-dnscrypt.sh" "$@" ;;
     dash) "$HOST_ENV" PATH="$TOOL_BIN" "$HOST_DASH" "$MODULE_DIR/scripts/update-dnscrypt.sh" "$@" ;;
+    mksh)
+      if [ "${DNSCRYPT_CONTROL_LOCK_HELD:-0}" = 1 ]; then
+        "$HOST_ENV" PATH="$TOOL_BIN" "$HOST_MKSH" "$MODULE_DIR/scripts/update-dnscrypt.sh" "$@" 8>&8
+      else
+        "$HOST_ENV" PATH="$TOOL_BIN" "$HOST_MKSH" "$MODULE_DIR/scripts/update-dnscrypt.sh" "$@"
+      fi
+      ;;
     busybox-ash)
       "$HOST_ENV" PATH="$TOOL_BIN" MOCK_COMMAND_DIR="$TOOL_BIN" \
         "$HOST_BUSYBOX" ash "$BUSYBOX_UPDATE_SCRIPT" "$@"
@@ -292,6 +307,7 @@ start_update_in_background() {
   case "$TEST_SHELL_KIND" in
     sh) "$HOST_ENV" PATH="$TOOL_BIN" "$HOST_SH" "$MODULE_DIR/scripts/update-dnscrypt.sh" "$@" > "$BACKGROUND_OUTPUT" 2>&1 & ;;
     dash) "$HOST_ENV" PATH="$TOOL_BIN" "$HOST_DASH" "$MODULE_DIR/scripts/update-dnscrypt.sh" "$@" > "$BACKGROUND_OUTPUT" 2>&1 & ;;
+    mksh) "$HOST_ENV" PATH="$TOOL_BIN" "$HOST_MKSH" "$MODULE_DIR/scripts/update-dnscrypt.sh" "$@" > "$BACKGROUND_OUTPUT" 2>&1 & ;;
     busybox-ash)
       "$HOST_ENV" PATH="$TOOL_BIN" MOCK_COMMAND_DIR="$TOOL_BIN" \
         "$HOST_BUSYBOX" ash "$BUSYBOX_UPDATE_SCRIPT" "$@" > "$BACKGROUND_OUTPUT" 2>&1 &
@@ -315,7 +331,7 @@ wait_for_lock_available() {
   WAIT_LOCK_COUNT=0
   while :; do
     exec 7>> "$WAIT_LOCK_PATH" || return 1
-    if "$HOST_FLOCK" -n 7; then
+    if "$HOST_FLOCK" -n 0 <&7; then
       exec 7>&-
       return 0
     fi
@@ -330,7 +346,7 @@ run_common() {
   # The snippet is intentionally expanded by the isolated child shell.
   # shellcheck disable=SC2016
   case "$TEST_SHELL_KIND" in
-    sh|dash)
+    sh|dash|mksh)
       run_test_shell_with_path "$TOOL_BIN" -c '
         MODDIR=$1
         export MODDIR
@@ -608,7 +624,7 @@ test_successful_metadata_starts_cooldown() {
 test_active_lock_is_preserved() {
   setup_fixture || return 1
   exec 8>> "$MODULE_DIR/run/update.lock.guard" || return 1
-  "$HOST_FLOCK" -n 8 || return 1
+  "$HOST_FLOCK" -n 0 <&8 || return 1
   printf 'flock:%s\n' "$$" > "$MODULE_DIR/run/update.lock"
 
   LOCK_OUTPUT=$(run_update auto 2>&1)
@@ -763,12 +779,23 @@ test_sigkill_releases_kernel_lock() {
   : > "$MOCK_WAIT_RELEASE"
   wait_for_lock_available "$MODULE_DIR/run/update.lock.guard" || return 1
 
+  if [ "$TEST_SHELL_KIND" = mksh ]; then
+    # The first post-crash retry already succeeded (no inherited FD 9), so
+    # clear only its cooldown before exercising another acquisition below.
+    rm -f "$MODULE_DIR/run/last-update-check"
+  fi
   RECOVERY_OUTPUT=$(run_update auto 2>&1)
   RECOVERY_STATUS=$?
 
   assert_eq 137 "$KILLED_STATUS" 'SIGKILL should terminate the first updater' || return 1
-  assert_eq 2 "$INHERITED_STATUS" 'an inherited lock descriptor must stay authoritative until the child exits' || return 1
-  assert_contains "$INHERITED_OUTPUT" 'Another update process is running.' 'the inherited descriptor did not reject a concurrent updater' || return 1
+  if [ "$TEST_SHELL_KIND" = mksh ]; then
+    # mksh keeps FD 9 private: the downloader does not retain the lock after
+    # owner death. Explicitly delegated control FD 8 is tested separately.
+    assert_eq 0 "$INHERITED_STATUS" 'the private mksh lock should release on owner death' || return 1
+  else
+    assert_eq 2 "$INHERITED_STATUS" 'an inherited lock descriptor must stay authoritative until the child exits' || return 1
+    assert_contains "$INHERITED_OUTPUT" 'Another update process is running.' 'the inherited descriptor did not reject a concurrent updater' || return 1
+  fi
   assert_eq 0 "$RECOVERY_STATUS" 'the kernel lock should be reusable after SIGKILL' || return 1
   assert_contains "$RECOVERY_OUTPUT" 'Already up to date' 'the post-SIGKILL retry did not continue' || return 1
   assert_not_exists "$MODULE_DIR/run/update.lock" 'the retry did not clean the stale diagnostic marker' || return 1
@@ -785,13 +812,13 @@ test_busybox_flock_fallback_dispatch() {
 
   assert_eq 0 "$FALLBACK_STATUS" 'BusyBox flock fallback should allow an update check' || return 1
   assert_contains "$FALLBACK_OUTPUT" 'Already up to date' 'BusyBox flock fallback did not continue' || return 1
-  assert_file_contains "$MOCK_CALL_LOG" 'busybox flock -n 9' 'BusyBox flock fallback was not invoked' || return 1
+  assert_file_contains "$MOCK_CALL_LOG" 'busybox flock -n 0' 'BusyBox flock fallback was not invoked' || return 1
 }
 
 test_busybox_flock_busy_maps_to_concurrent_status() {
   setup_fixture || return 1
   exec 8>> "$MODULE_DIR/run/update.lock.guard" || return 1
-  "$HOST_FLOCK" -n 8 || return 1
+  "$HOST_FLOCK" -n 0 <&8 || return 1
   printf 'flock:%s\n' "$$" > "$MODULE_DIR/run/update.lock"
   rm -f "$TOOL_BIN/flock"
   install_busybox_mock
@@ -801,7 +828,7 @@ test_busybox_flock_busy_maps_to_concurrent_status() {
 
   assert_eq 2 "$BUSY_STATUS" 'BusyBox flock contention should map to concurrent-update status' || return 1
   assert_contains "$BUSY_OUTPUT" 'Another update process is running.' 'BusyBox contention reason missing' || return 1
-  assert_file_contains "$MOCK_CALL_LOG" 'busybox flock -n 9' 'BusyBox contention path was not invoked' || return 1
+  assert_file_contains "$MOCK_CALL_LOG" 'busybox flock -n 0' 'BusyBox contention path was not invoked' || return 1
   assert_eq "flock:$$" "$(cat "$MODULE_DIR/run/update.lock")" 'BusyBox contention overwrote the active marker' || return 1
   exec 8>&-
 }
@@ -847,7 +874,7 @@ test_term_signal_stops_update_and_cleans_lock() {
   wait "$SIGNALED_PID"
   SIGNAL_STATUS=$?
 
-  assert_eq 143 "$SIGNAL_STATUS" 'TERM should stop the updater with signal-derived status' || return 1
+  assert_eq 143 "$SIGNAL_STATUS" 'TERM must report cancellation, never success' || return 1
   assert_not_exists "$MODULE_DIR/run/update.lock" 'a signaled updater should clean its owned lock' || return 1
   assert_not_exists "$MODULE_DIR/run/last-update-check" 'a signaled metadata request must not start cooldown' || return 1
   assert_old_binary_preserved "$MODULE_DIR/bin/dnscrypt-proxy" \
@@ -902,7 +929,7 @@ test_control_lock_contention_aborts_before_commit() {
   setup_fixture || return 1
   make_old_install
   exec 7>> "$MODULE_DIR/run/control.lock" || return 1
-  "$HOST_FLOCK" -n 7 || return 1
+  "$HOST_FLOCK" -n 0 <&7 || return 1
   printf '%s\n' '#!/bin/sh' 'exit 0' > "$TOOL_BIN/sleep"
   chmod 0755 "$TOOL_BIN/sleep"
 
@@ -934,11 +961,11 @@ test_runtime_lock_contention_aborts_before_commit() {
   # Initial ensure_runtime_tree has completed before the metadata barrier. Hold
   # the real inode lock only for the later binary/marker commit phase.
   exec 7>> "$MODULE_DIR/run/runtime-tree.lock" || return 1
-  "$HOST_FLOCK" -n 7 || return 1
+  "$HOST_FLOCK" -n 0 <&7 || return 1
   : > "$MOCK_WAIT_RELEASE"
   wait "$RUNTIME_CONTENDED_PID"
   RUNTIME_CONTENDED_STATUS=$?
-  "$HOST_FLOCK" -u 7 || return 1
+  "$HOST_FLOCK" -u 0 <&7 || return 1
   exec 7>&-
   unset DNSCRYPT_RUNTIME_LOCK_WAIT_SECONDS
 
@@ -958,11 +985,11 @@ test_runtime_lock_contention_aborts_before_commit() {
 test_inherited_control_lock_allows_missing_binary_recovery() {
   setup_fixture || return 1
   exec 8>> "$MODULE_DIR/run/control.lock" || return 1
-  "$HOST_FLOCK" -n 8 || return 1
+  "$HOST_FLOCK" -n 0 <&8 || return 1
   DNSCRYPT_CONTROL_LOCK_HELD=1
   export DNSCRYPT_CONTROL_LOCK_HELD
 
-  INHERITED_OUTPUT=$(run_update install 2>&1)
+  INHERITED_OUTPUT=$(run_update install 8>&8 2>&1)
   INHERITED_STATUS=$?
 
   unset DNSCRYPT_CONTROL_LOCK_HELD

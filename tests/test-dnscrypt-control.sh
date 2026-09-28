@@ -32,6 +32,7 @@ find_host_tool() {
 
 HOST_SH=$(find_host_tool sh 2>/dev/null || true)
 HOST_DASH=$(find_host_tool dash 2>/dev/null || true)
+HOST_MKSH=$(find_host_tool mksh 2>/dev/null || true)
 HOST_BUSYBOX=$(find_host_tool busybox 2>/dev/null || true)
 HOST_ENV=$(find_host_tool env 2>/dev/null || true)
 HOST_BASE64=$(find_host_tool base64 2>/dev/null || true)
@@ -64,6 +65,9 @@ case "$TEST_SHELL_KIND" in
     ;;
   dash)
     [ -n "$HOST_DASH" ] || { echo "dash is required" >&2; exit 2; }
+    ;;
+  mksh)
+    [ -n "$HOST_MKSH" ] || { echo "mksh is required" >&2; exit 2; }
     ;;
   busybox-ash)
     [ -n "$HOST_BUSYBOX" ] || { echo "busybox is required" >&2; exit 2; }
@@ -234,7 +238,7 @@ setup_fixture() {
     chmod 0600 "$MODULE_DIR/config/$list_file"
   done
 
-  for fixture_tool in awk cat chgrp chmod cmp cp date dd grep head ln ls mkdir rm sed sh sort stat tail tr uniq wc; do
+  for fixture_tool in printf awk cat chgrp chmod cmp cp date dd grep head ln ls mkdir rm sed sh sort stat tail tr uniq wc; do
     link_host_tool "$fixture_tool" || return 1
   done
   install_mock mv mv
@@ -310,6 +314,10 @@ run_control() {
       ;;
     dash)
       "$HOST_ENV" PATH="$TOOL_BIN" "$HOST_DASH" \
+        "$MODULE_DIR/scripts/dnscrypt-control.sh" "$@"
+      ;;
+    mksh)
+      "$HOST_ENV" PATH="$TOOL_BIN" "$HOST_MKSH" \
         "$MODULE_DIR/scripts/dnscrypt-control.sh" "$@"
       ;;
     busybox-ash)
@@ -1183,7 +1191,7 @@ test_lifecycle_lock_wait_and_shutdown_interlock() {
   output=$(run_control get-config 2>&1)
   status=$?
   assert_eq 0 "$status" "bounded control-lock wait did not recover: $output" || return 1
-  assert_eq 3 "$(grep -cF 'busybox flock -n 8' "$MOCK_CALL_LOG")" \
+  assert_eq 3 "$(grep -cF 'busybox flock -n 0' "$MOCK_CALL_LOG")" \
     "control lock was not retried for the requested bound" || return 1
 
   rm -f "$MOCK_FLOCK_STATE"
@@ -1193,7 +1201,7 @@ test_lifecycle_lock_wait_and_shutdown_interlock() {
   output=$(run_control get-config 2>&1)
   status=$?
   assert_eq 2 "$status" "exhausted lock contention did not return status 2: $output" || return 1
-  assert_eq 3 "$(grep -cF 'busybox flock -n 8' "$MOCK_CALL_LOG")" \
+  assert_eq 3 "$(grep -cF 'busybox flock -n 0' "$MOCK_CALL_LOG")" \
     "control lock exceeded or undershot its bounded retries" || return 1
 
   unset DNSCRYPT_CONTROL_LOCK_WAIT_SECONDS
@@ -1320,6 +1328,11 @@ run_private_dns_state_validation() {
         '. "$1"; private_dns_state_valid "$2"' lifecycle \
         "$MODULE_DIR/scripts/common.sh" "$state_file"
       ;;
+    mksh)
+      "$HOST_ENV" PATH="$TOOL_BIN" MODDIR="$MODULE_DIR" "$HOST_MKSH" -c \
+        '. "$1"; private_dns_state_valid "$2"' lifecycle \
+        "$MODULE_DIR/scripts/common.sh" "$state_file"
+      ;;
     busybox-ash)
       "$HOST_ENV" PATH="$TOOL_BIN" MODDIR="$MODULE_DIR" \
         "$HOST_BUSYBOX" ash -c \
@@ -1338,6 +1351,10 @@ run_dnscrypt_pid_probe() {
     dash)
       "$HOST_ENV" PATH="$TOOL_BIN" MODDIR="$MODULE_DIR" DNSCRYPT_PROC_ROOT="$DNSCRYPT_PROC_ROOT" \
         "$HOST_DASH" -c '. "$1"; dnscrypt_pid' pid-probe "$MODULE_DIR/scripts/common.sh"
+      ;;
+    mksh)
+      "$HOST_ENV" PATH="$TOOL_BIN" MODDIR="$MODULE_DIR" DNSCRYPT_PROC_ROOT="$DNSCRYPT_PROC_ROOT" \
+        "$HOST_MKSH" -c '. "$1"; dnscrypt_pid' pid-probe "$MODULE_DIR/scripts/common.sh"
       ;;
     busybox-ash)
       "$HOST_ENV" PATH="$TOOL_BIN" MODDIR="$MODULE_DIR" DNSCRYPT_PROC_ROOT="$DNSCRYPT_PROC_ROOT" \
@@ -1359,6 +1376,12 @@ run_common_probe() {
       "$HOST_ENV" PATH="$TOOL_BIN" MODDIR="$MODULE_DIR" \
         DNSCRYPT_PROC_ROOT="$DNSCRYPT_PROC_ROOT" DNSCRYPT_PROC_SYS_ROOT="$DNSCRYPT_PROC_SYS_ROOT" \
         "$HOST_DASH" -c '. "$1"; eval "$2"' common-probe \
+        "$MODULE_DIR/scripts/common.sh" "$probe"
+      ;;
+    mksh)
+      "$HOST_ENV" PATH="$TOOL_BIN" MODDIR="$MODULE_DIR" \
+        DNSCRYPT_PROC_ROOT="$DNSCRYPT_PROC_ROOT" DNSCRYPT_PROC_SYS_ROOT="$DNSCRYPT_PROC_SYS_ROOT" \
+        "$HOST_MKSH" -c '. "$1"; eval "$2"' common-probe \
         "$MODULE_DIR/scripts/common.sh" "$probe"
       ;;
     busybox-ash)
@@ -1611,18 +1634,18 @@ test_runtime_tree_recovers_transactions_and_honors_shutdown_lock() {
   printf '#!/bin/sh\nexec "%s" "$@"\n' "$HOST_FLOCK" > "$TOOL_BIN/flock"
   chmod 0755 "$TOOL_BIN/flock"
   exec 7>> "$MODULE_DIR/run/runtime-tree.lock" || return 1
-  "$HOST_FLOCK" -n 7 || return 1
+  "$HOST_FLOCK" -n 0 <&7 || return 1
   if run_common_probe '
       DNSCRYPT_RUNTIME_LOCK_WAIT_SECONDS=0
       export DNSCRYPT_RUNTIME_LOCK_WAIT_SECONDS
       ensure_runtime_tree
     ' >/dev/null 2>&1; then
     fail "runtime creation bypassed a contended lifecycle lock"
-    "$HOST_FLOCK" -u 7
+    "$HOST_FLOCK" -u 0 <&7
     exec 7>&-
     return 1
   fi
-  "$HOST_FLOCK" -u 7 || return 1
+  "$HOST_FLOCK" -u 0 <&7 || return 1
   exec 7>&-
   assert_not_exists "$DNSCRYPT_RUNTIME_ROOT" \
     "lock contention still created the canonical runtime" || return 1
@@ -2760,6 +2783,11 @@ EOF
         "$HOST_ENV" PATH="$TOOL_BIN" DNSCRYPT_WATCHDOG_INTERVAL_SECONDS=2 \
           DNSCRYPT_WATCHDOG_MAX_BACKOFF_SECONDS=8 DNSCRYPT_WATCHDOG_TEST_SLEEP="$TOOL_BIN/sleep" \
           "$HOST_DASH" "$MODULE_DIR/scripts/watchdog.sh"
+        ;;
+      mksh)
+        "$HOST_ENV" PATH="$TOOL_BIN" DNSCRYPT_WATCHDOG_INTERVAL_SECONDS=2 \
+          DNSCRYPT_WATCHDOG_MAX_BACKOFF_SECONDS=8 DNSCRYPT_WATCHDOG_TEST_SLEEP="$TOOL_BIN/sleep" \
+          "$HOST_MKSH" "$MODULE_DIR/scripts/watchdog.sh"
         ;;
       busybox-ash)
         "$HOST_ENV" PATH="$TOOL_BIN" DNSCRYPT_WATCHDOG_INTERVAL_SECONDS=2 \

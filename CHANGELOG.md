@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Android / mksh file-descriptor locks
+
+- Fix an existing Android shell compatibility defect in runtime-tree, control,
+  watchdog-start, and updater locks. Bridge shell-owned FD 6/7/8/9 onto stdin
+  for external flock, retaining the same open file description and stable inode.
+- Explicitly export the inherited control descriptor when delegating between
+  control and updater processes under mksh.
+- Add real mksh/flock contention and release regression coverage and a
+  dash, BusyBox ash, and mksh CI test matrix. Android Emulator acceptance of
+  these changes remains pending; the existing emulator staging is unchanged.
+
 ## v0.9.2 (2026-09-09)
 
 > **Device-evidence boundary:** the automated dash, BusyBox ash, JavaScript, lint, archive, and

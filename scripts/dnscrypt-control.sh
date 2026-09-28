@@ -166,7 +166,7 @@ ensure_binary() {
     # descriptor into the updater so its short commit phase cannot deadlock on
     # the parent shell while recovering a binary missing after installation.
     DNSCRYPT_CONTROL_LOCK_HELD=1 \
-      sh "$MODDIR/scripts/update-dnscrypt.sh" install >> "$UPDATE_LOG" 2>&1 || return 1
+      sh "$MODDIR/scripts/update-dnscrypt.sh" install 8>&8 >> "$UPDATE_LOG" 2>&1 || return 1
   fi
   runtime_binary_at_is_trusted "$DNSCRYPT_BIN" \
     && binary_version_bounded "$DNSCRYPT_BIN" >/dev/null 2>&1

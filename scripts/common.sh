@@ -3,6 +3,48 @@
 # shellcheck disable=SC2034
 set -u
 
+# File mutations must retain lifecycle locks even if their shell owner dies.
+# mksh makes shell-opened high FDs private, so export them on the external
+# command itself (a redirection on a shell function does not suffice). Keep
+# stdin unchanged: file commands may consume a pipe or redirected input.
+# These wrappers cover shared-tree mutations, including recursive cleanup and
+# sed's in-place replacement. Do not export locks to long-lived daemons.
+# Preserve runtime-tree (6), watchdog-start (7), and control (8) locks. FD9's
+# updater download-phase lifetime is intentionally unchanged.
+lifecycle_file_command() {
+  if ( : <&7 ) 2>/dev/null; then
+    if ( : <&6 ) 2>/dev/null; then
+      if ( : <&8 ) 2>/dev/null; then
+        command "$@" 6>&6 7>&7 8>&8
+      else
+        command "$@" 6>&6 7>&7
+      fi
+    elif ( : <&8 ) 2>/dev/null; then
+      command "$@" 7>&7 8>&8
+    else
+      command "$@" 7>&7
+    fi
+  elif ( : <&6 ) 2>/dev/null; then
+    if ( : <&8 ) 2>/dev/null; then
+      command "$@" 6>&6 8>&8
+    else
+      command "$@" 6>&6
+    fi
+  elif ( : <&8 ) 2>/dev/null; then
+    command "$@" 8>&8
+  else
+    command "$@"
+  fi
+}
+
+cp() { lifecycle_file_command cp "$@"; }
+mv() { lifecycle_file_command mv "$@"; }
+rm() { lifecycle_file_command rm "$@"; }
+chmod() { lifecycle_file_command chmod "$@"; }
+chown() { lifecycle_file_command chown "$@"; }
+mkdir() { lifecycle_file_command mkdir "$@"; }
+sed() { lifecycle_file_command sed "$@"; }
+
 MODID="dnscrypt-proxy-root"
 UPSTREAM_API="https://api.github.com/repos/DNSCrypt/dnscrypt-proxy/releases/latest"
 UPSTREAM_RELEASE_BASE="https://github.com/DNSCrypt/dnscrypt-proxy/releases/download"
@@ -1168,13 +1210,25 @@ files_equal_exact() {
   busybox_cmd cmp -s "$_exact_left" "$_exact_right"
 }
 
-flock_fd_nonblocking() {
-  _lock_fd="$1"
+flock_stdin_nonblocking() {
   if has_cmd flock; then
-    flock -n "$_lock_fd"
+    flock -n 0
     return $?
   fi
-  busybox_cmd flock -n "$_lock_fd"
+  busybox_cmd flock -n 0
+}
+
+flock_fd_nonblocking() {
+  # Android mksh keeps shell-owned high FDs private/close-on-exec. Bridge the
+  # same open file description onto stdin for the external flock process.
+  # The owner shell retains its original FD and therefore the kernel lock.
+  case "$1" in
+    6) flock_stdin_nonblocking <&6 ;;
+    7) flock_stdin_nonblocking <&7 ;;
+    8) flock_stdin_nonblocking <&8 ;;
+    9) flock_stdin_nonblocking <&9 ;;
+    *) return 64 ;;
+  esac
 }
 
 # Serialize mutating control actions. Normal WebUI/action calls remain
@@ -1214,6 +1268,8 @@ acquire_control_lock() {
 # a restart to dnscrypt-control.sh. Validate the inherited descriptor rather
 # than trusting an environment flag alone; this keeps the nested call on the
 # same stable inode and prevents a self-deadlock from reopening the lock file.
+# Delegating shells must explicitly export FD 8 with 8>&8 on the child command;
+# mksh otherwise closes its private high FD at that exec boundary.
 inherited_control_lock_valid() {
   [ "${DNSCRYPT_CONTROL_LOCK_HELD:-0}" = "1" ] || return 1
   if has_cmd readlink; then
