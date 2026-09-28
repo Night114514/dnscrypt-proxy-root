@@ -18,13 +18,35 @@ SUBSCRIPTION_TOTAL_MAX_BYTES=33554432
 SUBSCRIPTION_GENERATED_MAX_BYTES=33554432
 SUBSCRIPTION_FINAL_MAX_BYTES=33554432
 
-# Millisecond timestamp. toybox's date lacks %N and echoes the literal "%N",
-# so fall back to second precision when nanoseconds are unavailable.
+# Tag the clock source so a disappearing uptime source cannot mix clock epochs.
+# Linux/Android uptime is independent of wall-clock adjustments (10 ms on most
+# kernels). Keep realtime only as a fallback, clamped by dns_test below.
 _now_ms() {
+  if _ts=$(awk '
+    NR == 1 {
+      if ($1 !~ /^[0-9]+([.][0-9]+)?$/) exit 1
+      split($1, part, ".")
+      if (length(part[1]) > 10) exit 1
+      printf "%.0f\n", part[1] * 1000 + substr(part[2] "000", 1, 3)
+      exit
+    }
+    END { if (NR == 0) exit 1 }
+  ' "$PROC_ROOT/uptime" 2>/dev/null); then
+    printf 'uptime:%s\n' "$_ts"
+    return 0
+  fi
   _ts=$(date +%s%N 2>/dev/null)
   case "$_ts" in
-    *[!0-9]*|"") echo "$(( $(date +%s 2>/dev/null || echo 0) * 1000 ))" ;;
-    *) echo "$(( _ts / 1000000 ))" ;;
+    *[!0-9]*|"")
+      _ts=$(date +%s 2>/dev/null)
+      case "$_ts" in *[!0-9]*|"") printf 'unavailable:0\n'; return ;; esac
+      [ "${#_ts}" -le 10 ] || { printf 'unavailable:0\n'; return; }
+      printf 'realtime:%s\n' "$((_ts * 1000))"
+      ;;
+    *)
+      [ "${#_ts}" -le 19 ] || { printf 'unavailable:0\n'; return; }
+      printf '%s\n' "$_ts" | awk '{ printf "realtime:%.0f\n", int($0 / 1000000) }'
+      ;;
   esac
 }
 
@@ -2125,6 +2147,43 @@ snapshot_dnscrypt_data_log() {
 
 # dnscrypt-proxy's own -resolve client understands the configured nonstandard
 # listen port. Android Toybox/BusyBox nslookup does not reliably support -port.
+# The inner command runs as UID3003: both the executable and its ancestry must
+# be root-owned, non-writable by group/others, and readable/traversable by that
+# UID. Validate the original and resolved ancestry; retain the original name
+# because Android timeout is commonly a symlink whose basename selects Toybox.
+query_executable_is_trusted() {
+  _query_executable=$1
+  case "$_query_executable" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$_query_executable" in
+    *[!A-Za-z0-9_./-]*|*/../*|*/./*|*//*|/data/adb/*) return 1 ;;
+  esac
+  [ -f "$_query_executable" ] && [ -x "$_query_executable" ] || return 1
+  _query_resolved=$(readlink -f "$_query_executable" 2>/dev/null) || return 1
+  case "$_query_resolved" in /*) ;; *) return 1 ;; esac
+  case "$_query_resolved" in /data/adb/*) return 1 ;; esac
+  case "$(stat -c '%u:%a' "$_query_resolved" 2>/dev/null)" in
+    0:[1357][0145]5) ;;
+    *) return 1 ;;
+  esac
+  for _query_ancestor in "${_query_executable%/*}" "${_query_resolved%/*}"; do
+    [ -n "$_query_ancestor" ] || _query_ancestor=/
+    while :; do
+      _query_directory=$(readlink -f "$_query_ancestor" 2>/dev/null) || return 1
+      [ -d "$_query_directory" ] || return 1
+      case "$(stat -c '%u:%a' "$_query_directory" 2>/dev/null)" in
+        0:[1357][0145][15]) ;;
+        *) return 1 ;;
+      esac
+      [ "$_query_ancestor" != / ] || break
+      _query_ancestor=${_query_ancestor%/*}
+      [ -n "$_query_ancestor" ] || _query_ancestor=/
+    done
+  done
+}
+
 local_dns_query() {
   _query_name="$1"
   _query_limit="${2:-12}"
@@ -2151,17 +2210,19 @@ local_dns_query() {
   _query_outer_limit=$((_query_limit + 3))
   _query_status=127
 
-  if has_cmd timeout; then
+  _query_timeout=
+  if [ -x /system/bin/timeout ]; then
+    _query_timeout=/system/bin/timeout
+  elif has_cmd timeout; then
     _query_timeout=$(command -v timeout 2>/dev/null || true)
-    case "$_query_timeout" in
-      /*) ;;
-      *)
-        cleanup_config_check_snapshot "$_query_snapshot" >/dev/null 2>&1 || true
-        return 126
-        ;;
-    esac
+  fi
+  if [ -n "$_query_timeout" ]; then
+    if ! query_executable_is_trusted "$_query_timeout"; then
+      cleanup_config_check_snapshot "$_query_snapshot" >/dev/null 2>&1 || true
+      return 126
+    fi
     _query_command="exec '$_query_timeout' '$_query_limit' '$RUNTIME_BIN' -config '$_query_runtime_config' -resolve '$_query_name'"
-    timeout "$_query_outer_limit" su "$DNSCRYPT_UID" -c "$_query_command"
+    "$_query_timeout" "$_query_outer_limit" su "$DNSCRYPT_UID" -c "$_query_command"
     _query_status=$?
   else
     if has_cmd busybox; then
@@ -2175,13 +2236,10 @@ local_dns_query() {
     else
       _query_busybox=
     fi
-    case "$_query_busybox" in
-      /*) ;;
-      *)
-        cleanup_config_check_snapshot "$_query_snapshot" >/dev/null 2>&1 || true
-        return 126
-        ;;
-    esac
+    if ! query_executable_is_trusted "$_query_busybox"; then
+      cleanup_config_check_snapshot "$_query_snapshot" >/dev/null 2>&1 || true
+      return 126
+    fi
     _query_command="exec '$_query_busybox' timeout '$_query_limit' '$RUNTIME_BIN' -config '$_query_runtime_config' -resolve '$_query_name'"
     "$_query_busybox" timeout "$_query_outer_limit" \
       su "$DNSCRYPT_UID" -c "$_query_command"
@@ -2275,7 +2333,11 @@ dns_test() {
   _result=$(local_dns_query "$_domain" 8 2>&1) && _query_ok=1
   _end=$(_now_ms)
   if [ "$_query_ok" -eq 1 ]; then
-    _latency=$(( _end - _start ))
+    _latency=0
+    if [ "${_start%%:*}" = "${_end%%:*}" ]; then
+      _latency=$(( ${_end#*:} - ${_start#*:} ))
+      [ "$_latency" -ge 0 ] || _latency=0
+    fi
   else
     _latency=-1
     _result="Local DNS query failed or timed out"

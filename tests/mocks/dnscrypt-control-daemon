@@ -77,6 +77,12 @@ case " $* " in
     exit 0
     ;;
   *' -resolve '*)
+    if [ -n "${MOCK_QUERY_UPTIME_AFTER:-}" ]; then
+      printf '%s\n' "$MOCK_QUERY_UPTIME_AFTER" > "$DNSCRYPT_PROC_ROOT/uptime"
+    fi
+    if [ -n "${MOCK_QUERY_CLOCK_AFTER:-}" ]; then
+      printf '%s\n' "$MOCK_QUERY_CLOCK_AFTER" > "$MOCK_QUERY_CLOCK_FILE"
+    fi
     printf 'daemon-resolve-config %s\n' "$config_argument" >> "$MOCK_CALL_LOG"
     if [ "${MOCK_DAEMON_REQUIRE_CHECK_CONFIG_DIR:-0}" = 1 ]; then
       case "$config_argument" in
