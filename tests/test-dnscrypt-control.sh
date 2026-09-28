@@ -148,12 +148,17 @@ install_mock() {
 }
 
 setup_fixture() {
+  unset MOCK_QUERY_BAD_PATH MOCK_QUERY_BAD_ATTR MOCK_QUERY_UPTIME_AFTER MOCK_QUERY_CLOCK_AFTER
+  unset MOCK_QUERY_CLOCK_FILE MOCK_TIMEOUT_DISCOVERY ASH_STANDALONE
+  unset MOCK_QUERY_SECONDS_ONLY
   unset MOCK_DAEMON_REJECT_BLOCKED_ON_START
   unset DNSCRYPT_CONFIG_CHECK_TIMEOUT_SECONDS DNSCRYPT_CONFIG_CHECK_KILL_COMMAND
   unset DNSCRYPT_RUNTIME_ROOT DNSCRYPT_RUNTIME_TEST_MODE
   CURRENT_CASE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dnscrypt-control-test.XXXXXX") || return 1
   MODULE_DIR="$CURRENT_CASE_DIR/module"
   TOOL_BIN="$CURRENT_CASE_DIR/bin"
+  MOCK_QUERY_TOOL_ROOT=$TOOL_BIN
+  export MOCK_QUERY_TOOL_ROOT
   MOCK_CALL_LOG="$CURRENT_CASE_DIR/calls.log"
   MOCK_FIREWALL_STATE="$CURRENT_CASE_DIR/firewall-state"
   MOCK_SUBSCRIPTION_PAYLOAD="$CURRENT_CASE_DIR/subscription-payload.txt"
@@ -1022,6 +1027,169 @@ test_dns_test_uses_one_bounded_local_and_direct_query() {
     "policy-affected DNS comparison was not bounded by eight seconds" || return 1
   assert_contains "$output" '"comparison_scope":"policy_affected"' \
     "strict-mode diagnostics claimed or implied a true policy bypass"
+}
+
+# Exercise production functions in the fixture without adding backend actions.
+install_control_probe_body() {
+  for probe_script in "$MODULE_DIR/scripts/dnscrypt-control.sh" "$BUSYBOX_CONTROL_SCRIPT"; do
+    awk '/^if \[ -e "\$IMPORT_TRANSACTION_FILE"/ {exit} {print}' "$probe_script" > "$probe_script.probe"
+    cat "$CURRENT_CASE_DIR/probe-body" >> "$probe_script.probe"
+    mv "$probe_script.probe" "$probe_script"
+  done
+}
+
+prepare_query_portability_fixture() {
+  sed 's/\r$//' "$MOCK_SOURCE_DIR/dnscrypt-control-daemon" > "$MODULE_DIR/bin/dnscrypt-proxy"
+  chmod 0755 "$MODULE_DIR/bin/dnscrypt-proxy"
+  MOCK_DAEMON_REQUIRE_CHECK_CONFIG_DIR=1
+  MOCK_DAEMON_REQUIRE_SU=1
+  export MOCK_DAEMON_REQUIRE_CHECK_CONFIG_DIR MOCK_DAEMON_REQUIRE_SU
+}
+
+test_query_timeout_absolute_and_standalone() {
+  prepare_query_portability_fixture
+  setup_ready_daemon_fixture
+  link_host_tool timeout || return 1
+  output=$(run_control probe-upstream 2>&1)
+  status=$?
+  assert_eq 0 "$status" "absolute timeout probe failed: $output" || return 1
+  assert_file_contains "$MODULE_DIR/run/upstream-status.env" 'state=online' 'absolute probe is offline' || return 1
+
+  # Confirm real standalone discovery, then map Android's immutable system
+  # executable into the fixture. Never create or alter the host's /system.
+  discovered=$(ASH_STANDALONE=1 "$HOST_BUSYBOX" sh -c 'command -v timeout')
+  assert_eq timeout "$discovered" 'host BusyBox did not reproduce applet discovery' || return 1
+  # Android commonly exposes timeout as a Toybox symlink. Preserve its invoked
+  # name while validating the resolved binary and both paths' ancestry.
+  ln -s timeout "$TOOL_BIN/system-timeout"
+  for probe_script in "$MODULE_DIR/scripts/dnscrypt-control.sh" "$BUSYBOX_CONTROL_SCRIPT"; do
+    sed "s#/system/bin/timeout#$TOOL_BIN/system-timeout#g" "$probe_script" > "$probe_script.new"
+    mv "$probe_script.new" "$probe_script"
+  done
+  cat > "$CURRENT_CASE_DIR/probe-body" <<'PROBE'
+command() {
+  [ "$1" = -v ] && [ "$2" = timeout ] && { printf 'timeout\n'; return 0; }
+  if [ "$1" = -v ]; then
+    [ -x "$MOCK_QUERY_TOOL_ROOT/$2" ] || return 127
+    printf '%s/%s\n' "$MOCK_QUERY_TOOL_ROOT" "$2"; return 0
+  fi
+  _probe_tool=$1; shift
+  "$MOCK_QUERY_TOOL_ROOT/$_probe_tool" "$@"
+}
+has_cmd timeout || exit 1
+[ "$(command -v timeout)" = timeout ] || exit 1
+ensure_config || exit 1
+local_dns_query dns.google 8 || exit $?
+probe_upstream || exit $?
+grep -qx state=online "$UPSTREAM_STATUS_FILE" || exit 1
+for leftover in "$RUNTIME_ROOT/.config-check."*; do
+  [ ! -e "$leftover" ] || exit 1
+done
+PROBE
+  install_control_probe_body
+  ASH_STANDALONE=1
+  export ASH_STANDALONE
+  output=$(run_control probe-upstream 2>&1)
+  status=$?
+  assert_eq 0 "$status" "standalone query/probe returned $status (126 is the regression): $output" || return 1
+  assert_file_contains "$MOCK_CALL_LOG" "exec '$TOOL_BIN/system-timeout' '8'" \
+    'UID3003 query did not use the absolute system timeout'
+}
+
+test_query_timeout_rejects_unsafe_paths() {
+  prepare_query_portability_fixture
+  link_host_tool timeout || return 1
+  cat > "$CURRENT_CASE_DIR/probe-body" <<'PROBE'
+command() {
+  [ "$1" = -v ] && [ "$2" = timeout ] && { printf '%s\n' "$MOCK_TIMEOUT_DISCOVERY"; return 0; }
+  if [ "$1" = -v ]; then
+    [ -x "$MOCK_QUERY_TOOL_ROOT/$2" ] || return 127
+    printf '%s/%s\n' "$MOCK_QUERY_TOOL_ROOT" "$2"; return 0
+  fi
+  _probe_tool=$1; shift
+  "$MOCK_QUERY_TOOL_ROOT/$_probe_tool" "$@"
+}
+ensure_config || exit 1
+local_dns_query dns.google 8
+status=$?
+[ "$status" -eq 126 ] || { echo "unsafe timeout returned $status"; exit 1; }
+for leftover in "$RUNTIME_ROOT/.config-check."*; do
+  [ ! -e "$leftover" ] || exit 1
+done
+PROBE
+  install_control_probe_body
+  for unsafe_timeout in timeout relative/timeout "/tmp/unsafe'path" /data/adb/ksu/bin/busybox; do
+    MOCK_TIMEOUT_DISCOVERY=$unsafe_timeout
+    export MOCK_TIMEOUT_DISCOVERY
+    output=$(run_control probe-upstream 2>&1)
+    assert_eq 0 "$?" "unsafe timeout was not rejected: $output" || return 1
+  done
+  MOCK_TIMEOUT_DISCOVERY="$TOOL_BIN/timeout"
+  export MOCK_TIMEOUT_DISCOVERY
+  for bad_spec in 'file:3003:755' 'file:0:777' 'parent:0:700' 'parent:0:777'; do
+    case "$bad_spec" in file:*) MOCK_QUERY_BAD_PATH="$TOOL_BIN/timeout" ;; *) MOCK_QUERY_BAD_PATH="$TOOL_BIN" ;; esac
+    MOCK_QUERY_BAD_ATTR=${bad_spec#*:}
+    export MOCK_QUERY_BAD_PATH MOCK_QUERY_BAD_ATTR
+    output=$(run_control probe-upstream 2>&1)
+    assert_eq 0 "$?" "unsafe executable ancestry was accepted: $bad_spec: $output" || return 1
+  done
+  assert_eq 0 "$(grep -c '^daemon-resolve-config ' "$MOCK_CALL_LOG")" 'unsafe executable reached resolver'
+}
+
+test_query_snapshot_exact_cleanup_contract() {
+  run_common_probe '
+    exact="$RUNTIME_ROOT/.config-check.$$"
+    manual="$RUNTIME_ROOT/.config-check.manual.$$"
+    mkdir "$exact" "$manual" || exit 1
+    chown 3003:0 "$exact" "$manual" || exit 1
+    config_check_snapshot_is_owned "$exact" || exit 1
+    if config_check_snapshot_is_owned "$manual"; then exit 1; fi
+    if cleanup_config_check_snapshot "$manual"; then exit 1; fi
+    [ -d "$manual" ] || exit 1
+    cleanup_config_check_snapshot "$exact" || exit 1
+    [ ! -e "$exact" ] && [ -d "$manual" ]
+  ' || fail 'snapshot cleanup exact-path contract changed'
+}
+
+test_dns_test_monotonic_and_fallback_latency() {
+  prepare_query_portability_fixture
+  MOCK_QUERY_CLOCK_FILE="$CURRENT_CASE_DIR/clock"
+  export MOCK_QUERY_CLOCK_FILE
+  cat > "$TOOL_BIN/date" <<'DATE'
+#!/bin/sh
+case "$1" in
+  +%s%N)
+    if [ "${MOCK_QUERY_SECONDS_ONLY:-0}" = 1 ]; then printf '200%%N\n'; else cat "$MOCK_QUERY_CLOCK_FILE"; fi
+    ;;
+  +%s) value=$(cat "$MOCK_QUERY_CLOCK_FILE"); echo "$((value / 1000000000))" ;;
+  *) printf '2026-09-29 00:00:00\n' ;;
+esac
+DATE
+  chmod 0755 "$TOOL_BIN/date"
+  for timing_case in uptime fallback-backwards fallback-forward fallback-seconds source-lost; do
+    printf '200000000000\n' > "$MOCK_QUERY_CLOCK_FILE"
+    MOCK_QUERY_CLOCK_AFTER=199526000000
+    MOCK_QUERY_UPTIME_AFTER=
+    MOCK_QUERY_SECONDS_ONLY=0
+    case "$timing_case" in
+      uptime|source-lost)
+        printf '100.250 50.00\n' > "$DNSCRYPT_PROC_ROOT/uptime"
+        MOCK_QUERY_UPTIME_AFTER='100.375 50.00'
+        expected_latency=125
+        if [ "$timing_case" = source-lost ]; then MOCK_QUERY_UPTIME_AFTER=invalid; expected_latency=0; fi
+        ;;
+      fallback-backwards) rm -f "$DNSCRYPT_PROC_ROOT/uptime"; expected_latency=0 ;;
+      fallback-forward) printf 'invalid\n' > "$DNSCRYPT_PROC_ROOT/uptime"; MOCK_QUERY_CLOCK_AFTER=200250000000; expected_latency=250 ;;
+      fallback-seconds) rm -f "$DNSCRYPT_PROC_ROOT/uptime"; MOCK_QUERY_SECONDS_ONLY=1; expected_latency=0 ;;
+    esac
+    export MOCK_QUERY_CLOCK_AFTER MOCK_QUERY_UPTIME_AFTER
+    export MOCK_QUERY_SECONDS_ONLY
+    : > "$MOCK_CALL_LOG"
+    output=$(run_control dns-test dns.google 2>&1)
+    assert_eq 0 "$?" "$timing_case DNS test failed: $output" || return 1
+    assert_contains "$output" "\"latency_ms\":$expected_latency," "$timing_case elapsed time incorrect: $output" || return 1
+    assert_eq 1 "$(grep -c '^daemon-resolve-config ' "$MOCK_CALL_LOG")" 'timing performed multiple local queries' || return 1
+  done
 }
 
 test_resolver_rtt_log_parsing() {
@@ -3091,6 +3259,11 @@ run_case() {
 }
 
 echo "Running dnscrypt-control tests with $TEST_SHELL_KIND"
+
+run_case 'portability timeout absolute and standalone applet discovery' test_query_timeout_absolute_and_standalone
+run_case 'portability timeout rejects unsafe executables and ancestry' test_query_timeout_rejects_unsafe_paths
+run_case 'portability snapshot cleanup keeps exact path contract' test_query_snapshot_exact_cleanup_contract
+run_case 'portability DNS latency uses monotonic time and safe fallback' test_dns_test_monotonic_and_fallback_latency
 
 run_case 'hardening listener contract rejects unsupported and ambiguous listeners' test_listener_contract
 run_case 'hardening listener valid replacement repairs legacy config' test_listener_repair_existing_config

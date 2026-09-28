@@ -11,6 +11,22 @@ mock_state_value() {
   printf '%s\n' "$mock_state_result"
 }
 
+# Model a root-owned, UID3003-traversable executable hierarchy inside the
+# unprivileged test fixture. Only the timeout validator's format uses this.
+if [ "$#" -eq 3 ] && [ "$1" = -c ] && [ "$2" = '%u:%a' ]; then
+  if [ "$3" = "${MOCK_QUERY_BAD_PATH:-}" ]; then
+    printf '%s\n' "$MOCK_QUERY_BAD_ATTR"
+    exit 0
+  fi
+  case "$3" in
+    "${MOCK_QUERY_TOOL_ROOT:-}/"*) printf '0:755\n'; exit 0 ;;
+  esac
+  case "${MOCK_QUERY_TOOL_ROOT:-}/" in
+    "$3/"*|"$3") printf '0:755\n'; exit 0 ;;
+  esac
+  [ "$3" != / ] || { printf '0:755\n'; exit 0; }
+fi
+
 mock_runtime_identity() {
   mock_identity_path=$1
   case "$mock_identity_path" in
