@@ -116,6 +116,11 @@ case " $* " in
 esac
 
 printf 'daemon-start %s\n' "$config_argument" >> "$MOCK_CALL_LOG"
+if [ -n "${MOCK_DAEMON_REJECT_BLOCKED_ON_START:-}" ] \
+  && grep -Fx "$MOCK_DAEMON_REJECT_BLOCKED_ON_START" \
+    "${config_argument%/*}/blocked-names.txt" >/dev/null 2>&1; then
+  exit 73
+fi
 if [ -n "${MOCK_DAEMON_REJECT_ALLOWED_ON_START:-}" ] \
   && grep -Fx "$MOCK_DAEMON_REJECT_ALLOWED_ON_START" \
     "${DNSCRYPT_RUNTIME_ROOT:-$MODULE_DIR}/active/allowed-names.txt" >/dev/null 2>&1; then

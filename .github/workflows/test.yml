@@ -13,6 +13,10 @@ jobs:
   updater-tests:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shell_kind: [dash, busybox-ash, mksh]
 
     steps:
       - name: Check out repository
@@ -21,7 +25,7 @@ jobs:
       - name: Install shell test tools
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes busybox-static shellcheck util-linux
+          sudo apt-get install --no-install-recommends --yes busybox-static shellcheck util-linux mksh
 
       - name: Check shell syntax
         shell: bash
@@ -43,6 +47,17 @@ jobs:
             busybox ash -n "$file"
           done
 
+      - name: Check mksh syntax
+        shell: bash
+        run: |
+          mapfile -t shell_files < <({ git grep -Il '^#!.*sh'; printf '%s\n' customize.sh; } | sort -u)
+          for file in "${shell_files[@]}"; do
+            mksh -n "$file"
+          done
+
+      - name: Run real mksh flock portability tests
+        run: sh tests/test-flock-portability.sh
+
       - name: Run ShellCheck on every Shell file
         shell: bash
         run: |
@@ -58,6 +73,7 @@ jobs:
             scripts/update-dnscrypt.sh \
             tests/test-dnscrypt-control.sh \
             tests/test-update-dnscrypt.sh \
+            tests/test-flock-portability.sh \
             tests/mocks/busybox \
             tests/mocks/busybox-ash-prelude \
             tests/mocks/date \
@@ -102,14 +118,23 @@ jobs:
       - name: Verify generated WebUI is reproducible
         run: node webui/build.mjs --check
 
-      - name: Run updater tests with dash
-        run: env DNSCRYPT_UPDATE_INTERVAL_SECONDS=0 TEST_SHELL_KIND=dash dash tests/test-update-dnscrypt.sh
+      - name: Run updater tests (${{ matrix.shell_kind }})
+        env:
+          TEST_SHELL_KIND: ${{ matrix.shell_kind }}
+          DNSCRYPT_UPDATE_INTERVAL_SECONDS: "0"
+        run: |
+          case "$TEST_SHELL_KIND" in
+            dash) dash tests/test-update-dnscrypt.sh ;;
+            busybox-ash) busybox ash tests/test-update-dnscrypt.sh ;;
+            mksh) mksh tests/test-update-dnscrypt.sh ;;
+          esac
 
-      - name: Run dnscrypt-control tests with dash
-        run: env TEST_SHELL_KIND=dash dash tests/test-dnscrypt-control.sh
-
-      - name: Run updater tests with BusyBox ash
-        run: env DNSCRYPT_UPDATE_INTERVAL_SECONDS=0 TEST_SHELL_KIND=busybox-ash busybox ash tests/test-update-dnscrypt.sh
-
-      - name: Run dnscrypt-control tests with BusyBox ash
-        run: env TEST_SHELL_KIND=busybox-ash busybox ash tests/test-dnscrypt-control.sh
+      - name: Run dnscrypt-control tests (${{ matrix.shell_kind }})
+        env:
+          TEST_SHELL_KIND: ${{ matrix.shell_kind }}
+        run: |
+          case "$TEST_SHELL_KIND" in
+            dash) dash tests/test-dnscrypt-control.sh ;;
+            busybox-ash) busybox ash tests/test-dnscrypt-control.sh ;;
+            mksh) mksh tests/test-dnscrypt-control.sh ;;
+          esac

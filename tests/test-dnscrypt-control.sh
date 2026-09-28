@@ -32,6 +32,7 @@ find_host_tool() {
 
 HOST_SH=$(find_host_tool sh 2>/dev/null || true)
 HOST_DASH=$(find_host_tool dash 2>/dev/null || true)
+HOST_MKSH=$(find_host_tool mksh 2>/dev/null || true)
 HOST_BUSYBOX=$(find_host_tool busybox 2>/dev/null || true)
 HOST_ENV=$(find_host_tool env 2>/dev/null || true)
 HOST_BASE64=$(find_host_tool base64 2>/dev/null || true)
@@ -64,6 +65,9 @@ case "$TEST_SHELL_KIND" in
     ;;
   dash)
     [ -n "$HOST_DASH" ] || { echo "dash is required" >&2; exit 2; }
+    ;;
+  mksh)
+    [ -n "$HOST_MKSH" ] || { echo "mksh is required" >&2; exit 2; }
     ;;
   busybox-ash)
     [ -n "$HOST_BUSYBOX" ] || { echo "busybox is required" >&2; exit 2; }
@@ -144,6 +148,7 @@ install_mock() {
 }
 
 setup_fixture() {
+  unset MOCK_DAEMON_REJECT_BLOCKED_ON_START
   unset DNSCRYPT_CONFIG_CHECK_TIMEOUT_SECONDS DNSCRYPT_CONFIG_CHECK_KILL_COMMAND
   unset DNSCRYPT_RUNTIME_ROOT DNSCRYPT_RUNTIME_TEST_MODE
   CURRENT_CASE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dnscrypt-control-test.XXXXXX") || return 1
@@ -233,7 +238,7 @@ setup_fixture() {
     chmod 0600 "$MODULE_DIR/config/$list_file"
   done
 
-  for fixture_tool in awk cat chgrp chmod cmp cp date dd grep head ln ls mkdir rm sed sh sort stat tail tr uniq wc; do
+  for fixture_tool in printf awk cat chgrp chmod cmp cp date dd grep head ln ls mkdir rm sed sh sort stat tail tr uniq wc; do
     link_host_tool "$fixture_tool" || return 1
   done
   install_mock mv mv
@@ -309,6 +314,10 @@ run_control() {
       ;;
     dash)
       "$HOST_ENV" PATH="$TOOL_BIN" "$HOST_DASH" \
+        "$MODULE_DIR/scripts/dnscrypt-control.sh" "$@"
+      ;;
+    mksh)
+      "$HOST_ENV" PATH="$TOOL_BIN" "$HOST_MKSH" \
         "$MODULE_DIR/scripts/dnscrypt-control.sh" "$@"
       ;;
     busybox-ash)
@@ -926,6 +935,7 @@ test_subscription_section_replacement_and_failure_rollback() {
   assert_file_contains "$blocklist" 'second.example' "replacement rule was not installed" || return 1
   assert_file_not_contains "$blocklist" 'first.example' "old managed rule accumulated" || return 1
 
+  cp "$blocklist" "$CURRENT_CASE_DIR/pre-download-list"
   before=$(cat "$blocklist")
   MOCK_DOWNLOAD_MODE=failure
   output=$(run_control apply-subscriptions 2>&1)
@@ -934,6 +944,8 @@ test_subscription_section_replacement_and_failure_rollback() {
   assert_contains "$output" 'previous blocklist was kept' "rollback message is missing" || return 1
   after=$(cat "$blocklist")
   assert_eq "$before" "$after" "failed download changed the live blocklist" || return 1
+  "$HOST_CMP" -s "$blocklist" "$CURRENT_CASE_DIR/pre-download-list" \
+    || fail "failed download changed exact canonical bytes" || return 1
   assert_file_contains "$MOCK_CALL_LOG" 'busybox wget ' \
     "subscription download did not exercise BusyBox wget fallback"
 }
@@ -1179,7 +1191,7 @@ test_lifecycle_lock_wait_and_shutdown_interlock() {
   output=$(run_control get-config 2>&1)
   status=$?
   assert_eq 0 "$status" "bounded control-lock wait did not recover: $output" || return 1
-  assert_eq 3 "$(grep -cF 'busybox flock -n 8' "$MOCK_CALL_LOG")" \
+  assert_eq 3 "$(grep -cF 'busybox flock -n 0' "$MOCK_CALL_LOG")" \
     "control lock was not retried for the requested bound" || return 1
 
   rm -f "$MOCK_FLOCK_STATE"
@@ -1189,7 +1201,7 @@ test_lifecycle_lock_wait_and_shutdown_interlock() {
   output=$(run_control get-config 2>&1)
   status=$?
   assert_eq 2 "$status" "exhausted lock contention did not return status 2: $output" || return 1
-  assert_eq 3 "$(grep -cF 'busybox flock -n 8' "$MOCK_CALL_LOG")" \
+  assert_eq 3 "$(grep -cF 'busybox flock -n 0' "$MOCK_CALL_LOG")" \
     "control lock exceeded or undershot its bounded retries" || return 1
 
   unset DNSCRYPT_CONTROL_LOCK_WAIT_SECONDS
@@ -1316,6 +1328,11 @@ run_private_dns_state_validation() {
         '. "$1"; private_dns_state_valid "$2"' lifecycle \
         "$MODULE_DIR/scripts/common.sh" "$state_file"
       ;;
+    mksh)
+      "$HOST_ENV" PATH="$TOOL_BIN" MODDIR="$MODULE_DIR" "$HOST_MKSH" -c \
+        '. "$1"; private_dns_state_valid "$2"' lifecycle \
+        "$MODULE_DIR/scripts/common.sh" "$state_file"
+      ;;
     busybox-ash)
       "$HOST_ENV" PATH="$TOOL_BIN" MODDIR="$MODULE_DIR" \
         "$HOST_BUSYBOX" ash -c \
@@ -1334,6 +1351,10 @@ run_dnscrypt_pid_probe() {
     dash)
       "$HOST_ENV" PATH="$TOOL_BIN" MODDIR="$MODULE_DIR" DNSCRYPT_PROC_ROOT="$DNSCRYPT_PROC_ROOT" \
         "$HOST_DASH" -c '. "$1"; dnscrypt_pid' pid-probe "$MODULE_DIR/scripts/common.sh"
+      ;;
+    mksh)
+      "$HOST_ENV" PATH="$TOOL_BIN" MODDIR="$MODULE_DIR" DNSCRYPT_PROC_ROOT="$DNSCRYPT_PROC_ROOT" \
+        "$HOST_MKSH" -c '. "$1"; dnscrypt_pid' pid-probe "$MODULE_DIR/scripts/common.sh"
       ;;
     busybox-ash)
       "$HOST_ENV" PATH="$TOOL_BIN" MODDIR="$MODULE_DIR" DNSCRYPT_PROC_ROOT="$DNSCRYPT_PROC_ROOT" \
@@ -1355,6 +1376,12 @@ run_common_probe() {
       "$HOST_ENV" PATH="$TOOL_BIN" MODDIR="$MODULE_DIR" \
         DNSCRYPT_PROC_ROOT="$DNSCRYPT_PROC_ROOT" DNSCRYPT_PROC_SYS_ROOT="$DNSCRYPT_PROC_SYS_ROOT" \
         "$HOST_DASH" -c '. "$1"; eval "$2"' common-probe \
+        "$MODULE_DIR/scripts/common.sh" "$probe"
+      ;;
+    mksh)
+      "$HOST_ENV" PATH="$TOOL_BIN" MODDIR="$MODULE_DIR" \
+        DNSCRYPT_PROC_ROOT="$DNSCRYPT_PROC_ROOT" DNSCRYPT_PROC_SYS_ROOT="$DNSCRYPT_PROC_SYS_ROOT" \
+        "$HOST_MKSH" -c '. "$1"; eval "$2"' common-probe \
         "$MODULE_DIR/scripts/common.sh" "$probe"
       ;;
     busybox-ash)
@@ -1607,18 +1634,18 @@ test_runtime_tree_recovers_transactions_and_honors_shutdown_lock() {
   printf '#!/bin/sh\nexec "%s" "$@"\n' "$HOST_FLOCK" > "$TOOL_BIN/flock"
   chmod 0755 "$TOOL_BIN/flock"
   exec 7>> "$MODULE_DIR/run/runtime-tree.lock" || return 1
-  "$HOST_FLOCK" -n 7 || return 1
+  "$HOST_FLOCK" -n 0 <&7 || return 1
   if run_common_probe '
       DNSCRYPT_RUNTIME_LOCK_WAIT_SECONDS=0
       export DNSCRYPT_RUNTIME_LOCK_WAIT_SECONDS
       ensure_runtime_tree
     ' >/dev/null 2>&1; then
     fail "runtime creation bypassed a contended lifecycle lock"
-    "$HOST_FLOCK" -u 7
+    "$HOST_FLOCK" -u 0 <&7
     exec 7>&-
     return 1
   fi
-  "$HOST_FLOCK" -u 7 || return 1
+  "$HOST_FLOCK" -u 0 <&7 || return 1
   exec 7>&-
   assert_not_exists "$DNSCRYPT_RUNTIME_ROOT" \
     "lock contention still created the canonical runtime" || return 1
@@ -2391,6 +2418,7 @@ test_startup_grace_matches_upstream_netprobe_semantics() {
 write_quick_mode_fixture() {
   printf '%s\n' \
     "user_name = '3003'" \
+    "listen_addresses = ['127.0.0.1:5354']" \
     '  server_names = ['"'"'cloudflare'"'"']' \
     '  dnscrypt_servers = true' \
     '  doh_servers = true' \
@@ -2486,6 +2514,7 @@ test_quick_mode_rewrite_is_scoped_atomic_and_fail_closed() {
   # must be removed without requiring a following header as a sentinel.
   printf '%s\n' \
     "user_name = '3003'" \
+    "listen_addresses = ['127.0.0.1:5354']" \
     "server_names = ['cloudflare']" \
     'dnscrypt_servers = true' \
     'doh_servers = true' \
@@ -2755,6 +2784,11 @@ EOF
           DNSCRYPT_WATCHDOG_MAX_BACKOFF_SECONDS=8 DNSCRYPT_WATCHDOG_TEST_SLEEP="$TOOL_BIN/sleep" \
           "$HOST_DASH" "$MODULE_DIR/scripts/watchdog.sh"
         ;;
+      mksh)
+        "$HOST_ENV" PATH="$TOOL_BIN" DNSCRYPT_WATCHDOG_INTERVAL_SECONDS=2 \
+          DNSCRYPT_WATCHDOG_MAX_BACKOFF_SECONDS=8 DNSCRYPT_WATCHDOG_TEST_SLEEP="$TOOL_BIN/sleep" \
+          "$HOST_MKSH" "$MODULE_DIR/scripts/watchdog.sh"
+        ;;
       busybox-ash)
         "$HOST_ENV" PATH="$TOOL_BIN" DNSCRYPT_WATCHDOG_INTERVAL_SECONDS=2 \
           DNSCRYPT_WATCHDOG_MAX_BACKOFF_SECONDS=8 DNSCRYPT_WATCHDOG_TEST_SLEEP="$TOOL_BIN/sleep" \
@@ -2831,6 +2865,206 @@ test_webui_relative_assets_and_android_source_invariants() {
     "watchdog does not record upstream reachability separately"
 }
 
+test_subscription_limit() {
+  limit_name=$1
+  blocklist="$MODULE_DIR/config/blocked-names.txt"
+  printf '%s\n' 'manual.example' > "$blocklist"
+  cp "$blocklist" "$CURRENT_CASE_DIR/old-list"
+  printf '%s\n' '[{"url":"https://example.invalid/a","enabled":true},{"url":"https://example.invalid/b","enabled":true},{"url":"https://example.invalid/disabled","enabled":false}]' > "$MODULE_DIR/config/subscriptions.json"
+  chmod 0600 "$MODULE_DIR/config/subscriptions.json"
+  printf '%s\n' 'download.example' > "$MOCK_SUBSCRIPTION_PAYLOAD"
+  output=$(run_control apply-subscriptions 2>&1)
+  assert_eq 0 "$?" "limit fixture apply failed: $output" || return 1
+  case "$limit_name" in
+    SUBSCRIPTION_MAX_ENABLED) measured=2 ;;
+    SUBSCRIPTION_DOWNLOAD_MAX_BYTES) measured=$(wc -c < "$MOCK_SUBSCRIPTION_PAYLOAD") ;;
+    SUBSCRIPTION_TOTAL_MAX_BYTES) measured=$((2 * $(wc -c < "$MOCK_SUBSCRIPTION_PAYLOAD"))) ;;
+    SUBSCRIPTION_GENERATED_MAX_BYTES)
+      measured=$(sed -n '/^## BEGIN dnscrypt-proxy-root managed subscriptions/,$p' "$blocklist" | wc -c)
+      ;;
+    SUBSCRIPTION_FINAL_MAX_BYTES) measured=$(wc -c < "$blocklist") ;;
+  esac
+  for delta in 1 0 -1; do
+    budget=$((measured + delta))
+    # Scale the literal in the fixture only; production has no environment override.
+    for script in "$MODULE_DIR/scripts/dnscrypt-control.sh" "$BUSYBOX_CONTROL_SCRIPT"; do
+      sed -i "s/^$limit_name=.*/$limit_name=$budget/" "$script"
+    done
+    cp "$CURRENT_CASE_DIR/old-list" "$blocklist"
+    output=$(run_control apply-subscriptions 2>&1)
+    status=$?
+    if [ "$delta" -ge 0 ]; then
+      assert_eq 0 "$status" "at/below $limit_name rejected: $output" || return 1
+      assert_file_contains "$blocklist" manual.example "manual rule lost" || return 1
+    else
+      [ "$status" -ne 0 ] || fail "$limit_name exceeded without rejection" || return 1
+      "$HOST_CMP" -s "$blocklist" "$CURRENT_CASE_DIR/old-list" || fail "$limit_name changed old list" || return 1
+    fi
+    for leftover in "$MODULE_DIR/run"/subscription-* "$MODULE_DIR/config"/.subscription-*; do
+      [ ! -e "$leftover" ] || fail "$limit_name leaked transaction temporary file: $leftover" || return 1
+    done
+  done
+}
+
+test_subscription_count_limit() { test_subscription_limit SUBSCRIPTION_MAX_ENABLED; }
+test_subscription_download_limit() { test_subscription_limit SUBSCRIPTION_DOWNLOAD_MAX_BYTES; }
+test_subscription_total_limit() { test_subscription_limit SUBSCRIPTION_TOTAL_MAX_BYTES; }
+test_subscription_generated_limit() { test_subscription_limit SUBSCRIPTION_GENERATED_MAX_BYTES; }
+test_subscription_final_limit() { test_subscription_limit SUBSCRIPTION_FINAL_MAX_BYTES; }
+
+test_subscription_restart_transaction() {
+  expected_status=${1:-1}
+  printf '%s\n' upstream_only > "$MODULE_DIR/state/dns-mode.state"
+  prepare_runtime_tree_fixture || return 1
+  blocklist="$MODULE_DIR/config/blocked-names.txt"
+  printf '%s\n' 'manual-before.example' \
+    '## BEGIN dnscrypt-proxy-root managed subscriptions' 'old.example' \
+    '## END dnscrypt-proxy-root managed subscriptions' 'manual-after.example' > "$blocklist"
+  cp "$blocklist" "$CURRENT_CASE_DIR/old-list"
+  printf '%s\n' '[{"url":"https://example.invalid/list","enabled":true}]' > "$MODULE_DIR/config/subscriptions.json"
+  chmod 0600 "$MODULE_DIR/config/subscriptions.json"
+  printf '%s\n' 'new.example' > "$MOCK_SUBSCRIPTION_PAYLOAD"
+  output=$(run_control start 2>&1)
+  assert_eq 0 "$?" "subscription fixture start failed: $output" || return 1
+  blocklist="$DNSCRYPT_RUNTIME_ROOT/config/blocked-names.txt"
+  output=$(run_control apply-subscriptions 2>&1)
+  assert_eq 0 "$?" "live successful apply failed: $output" || return 1
+  "$HOST_CMP" -s "$blocklist" "$DNSCRYPT_RUNTIME_ROOT/active/blocked-names.txt" \
+    || fail "successful apply did not activate new generation" || return 1
+  assert_file_contains "$blocklist" manual-before.example "manual rule before markers lost" || return 1
+  assert_file_contains "$blocklist" manual-after.example "manual rule after markers lost" || return 1
+  cp "$blocklist" "$CURRENT_CASE_DIR/old-list"
+  printf '%s\n' 'rejected.example' > "$MOCK_SUBSCRIPTION_PAYLOAD"
+  MOCK_DAEMON_REJECT_BLOCKED_ON_START=rejected.example
+  export MOCK_DAEMON_REJECT_BLOCKED_ON_START
+  if [ "$expected_status" = 3 ]; then
+    MOCK_DAEMON_START_MODE='exit'
+    export MOCK_DAEMON_START_MODE
+  fi
+  output=$(run_control apply-subscriptions 2>&1)
+  status=$?
+  assert_eq "$expected_status" "$status" "restart failure status incorrect: $output" || return 1
+  "$HOST_CMP" -s "$blocklist" "$CURRENT_CASE_DIR/old-list" || fail "restart failure did not restore exact old list" || return 1
+  if [ "$expected_status" = 3 ]; then
+    assert_contains "$output" 'recovery' "rollback restart failure omitted recovery-required state" || return 1
+    assert_contains "$output" 'previous canonical blocklist was restored' "recovery message did not identify the restored canonical list" || return 1
+  else
+    run_common_probe 'is_dnscrypt_ready' || fail "previous generation was not restarted" || return 1
+    "$HOST_CMP" -s "$blocklist" "$DNSCRYPT_RUNTIME_ROOT/active/blocked-names.txt" \
+      || fail "rollback did not activate old generation" || return 1
+  fi
+  run_control stop >/dev/null 2>&1
+}
+
+test_subscription_recovery() {
+  test_subscription_restart_transaction 3
+}
+
+test_default_template_recreation() {
+  prepare_runtime_tree_fixture || return 1
+  run_control get-config >/dev/null 2>&1 || return 1
+  # A template-only comment simulates the next shipped default revision.
+  printf '\n# template drift sentinel\n' >> "$MODULE_DIR/config/dnscrypt-proxy.toml"
+  rm -f "$DNSCRYPT_RUNTIME_ROOT/config/dnscrypt-proxy.toml"
+  output=$(run_control get-config 2>&1)
+  assert_eq 0 "$?" "default recreation failed: $output" || return 1
+  "$HOST_CMP" -s "$MODULE_DIR/config/dnscrypt-proxy.toml" "$DNSCRYPT_RUNTIME_ROOT/config/dnscrypt-proxy.toml" \
+    || fail "recreated default drifted from shipped template"
+}
+
+test_decoded_config_size() {
+  sed 's/\r$//' "$MOCK_SOURCE_DIR/dnscrypt-control-daemon" > "$MODULE_DIR/bin/dnscrypt-proxy"
+  chmod 0755 "$MODULE_DIR/bin/dnscrypt-proxy"
+  cp "$MODULE_DIR/config/dnscrypt-proxy.toml" "$CURRENT_CASE_DIR/old-config"
+  for size in 65535 65536 65537; do
+    candidate="$CURRENT_CASE_DIR/size.toml"
+    cp "$CURRENT_CASE_DIR/old-config" "$candidate"
+    remaining=$((size - $(wc -c < "$candidate") - 2))
+    printf '\n#' >> "$candidate"
+    head -c "$remaining" /dev/zero | tr '\000' x >> "$candidate"
+    payload=$(host_b64_file "$candidate")
+    : > "$MOCK_CALL_LOG"
+    output=$(run_control save-config-b64 "$payload" 2>&1)
+    status=$?
+    if [ "$size" -le 65536 ]; then
+      assert_eq 0 "$status" "in-limit TOML rejected: $output" || return 1
+      cp "$MODULE_DIR/config/dnscrypt-proxy.toml" "$CURRENT_CASE_DIR/last-valid-config"
+    else
+      [ "$status" -ne 0 ] || fail "oversized decoded TOML accepted" || return 1
+      assert_file_not_contains "$MOCK_CALL_LOG" daemon-check-config "oversized config reached expensive validation" || return 1
+      assert_contains "$output" 'size limit' "oversized config lacks clear size error" || return 1
+      "$HOST_CMP" -s "$MODULE_DIR/config/dnscrypt-proxy.toml" "$CURRENT_CASE_DIR/last-valid-config" \
+        || fail "oversized TOML changed canonical bytes" || return 1
+    fi
+  done
+}
+
+test_listener_contract() {
+  sed 's/\r$//' "$MOCK_SOURCE_DIR/dnscrypt-control-daemon" > "$MODULE_DIR/bin/dnscrypt-proxy"
+  chmod 0755 "$MODULE_DIR/bin/dnscrypt-proxy"
+  config="$MODULE_DIR/config/dnscrypt-proxy.toml"
+  cp "$config" "$CURRENT_CASE_DIR/before.toml"
+  payload=$(host_b64_file "$config")
+  output=$(run_control save-config-b64 "$payload" 2>&1)
+  assert_eq 0 "$?" "supported listener rejected: $output" || return 1
+  for listener in "['127.0.0.1:5454']" "['0.0.0.0:5354']" "['192.168.1.2:5354']" "['127.0.0.1:5354', '127.0.0.1:5454']" "['127.0.0.1 :5354']"; do
+    sed "s/\['127.0.0.1:5354'\]/$listener/" "$config" > "$CURRENT_CASE_DIR/new.toml"
+    payload=$(host_b64_file "$CURRENT_CASE_DIR/new.toml")
+    output=$(run_control save-config-b64 "$payload" 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "unsupported listener accepted: $listener" || return 1
+    "$HOST_CMP" -s "$config" "$CURRENT_CASE_DIR/before.toml" || fail "rejected listener changed canonical bytes" || return 1
+  done
+  for ambiguous in duplicate quoted multiline; do
+    cp "$config" "$CURRENT_CASE_DIR/new.toml"
+    case "$ambiguous" in
+      duplicate) sed -i '1p' "$CURRENT_CASE_DIR/new.toml" ;;
+      quoted) sed -i '1i "listen_addresses" = ["127.0.0.1:5454"]' "$CURRENT_CASE_DIR/new.toml" ;;
+      multiline) sed -i '1c listen_addresses = [\n"127.0.0.1:5354"\n]' "$CURRENT_CASE_DIR/new.toml" ;;
+    esac
+    payload=$(host_b64_file "$CURRENT_CASE_DIR/new.toml")
+    output=$(run_control save-config-b64 "$payload" 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "ambiguous listener accepted: $ambiguous" || return 1
+    "$HOST_CMP" -s "$config" "$CURRENT_CASE_DIR/before.toml" || return 1
+  done
+}
+
+test_listener_repair_existing_config() {
+  sed 's/\r$//' "$MOCK_SOURCE_DIR/dnscrypt-control-daemon" > "$MODULE_DIR/bin/dnscrypt-proxy"
+  chmod 0755 "$MODULE_DIR/bin/dnscrypt-proxy"
+  config="$MODULE_DIR/config/dnscrypt-proxy.toml"
+  payload=$(host_b64_file "$config")
+  sed -i 's/127.0.0.1:5354/127.0.0.1:5454/' "$config"
+  output=$(run_control save-config-b64 "$payload" 2>&1)
+  assert_eq 0 "$?" "valid replacement could not repair legacy listener: $output"
+}
+
+test_listener_shared_write_validation() {
+  sed 's/\r$//' "$MOCK_SOURCE_DIR/dnscrypt-control-daemon" > "$MODULE_DIR/bin/dnscrypt-proxy"
+  chmod 0755 "$MODULE_DIR/bin/dnscrypt-proxy"
+  config="$MODULE_DIR/config/dnscrypt-proxy.toml"
+  cp "$config" "$CURRENT_CASE_DIR/listener-baseline"
+  sed 's/127.0.0.1:5354/0.0.0.0:5354/' "$config" > "$CURRENT_CASE_DIR/listener-import"
+  encoded_config=$(host_b64_file "$CURRENT_CASE_DIR/listener-import")
+  printf '{"version":1,"config":"%s","blocked_names":"","allowed_names":"","blocked_ips":"","allowed_ips":"","subscriptions":""}\n' \
+    "$encoded_config" > "$CURRENT_CASE_DIR/listener-manifest"
+  payload=$(host_b64_file "$CURRENT_CASE_DIR/listener-manifest")
+  output=$(run_control import-config-b64 "$payload" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "import accepted unsupported listener" || return 1
+  "$HOST_CMP" -s "$config" "$CURRENT_CASE_DIR/listener-baseline" || fail "import changed old config" || return 1
+  cp "$CURRENT_CASE_DIR/listener-import" "$config"
+  output=$(run_control quick-mode fastest 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "quick preset accepted unsupported listener" || return 1
+  "$HOST_CMP" -s "$config" "$CURRENT_CASE_DIR/listener-import" || fail "preset changed old config" || return 1
+  output=$(run_control set-resolvers cloudflare 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "resolver setter accepted unsupported listener" || return 1
+  "$HOST_CMP" -s "$config" "$CURRENT_CASE_DIR/listener-import" || fail "resolver setter changed old config"
+}
+
 run_case() {
   case_name=$1
   case_function=$2
@@ -2857,6 +3091,19 @@ run_case() {
 }
 
 echo "Running dnscrypt-control tests with $TEST_SHELL_KIND"
+
+run_case 'hardening listener contract rejects unsupported and ambiguous listeners' test_listener_contract
+run_case 'hardening listener valid replacement repairs legacy config' test_listener_repair_existing_config
+run_case 'hardening listener validation covers import preset and resolver writes' test_listener_shared_write_validation
+run_case 'hardening subscription rollback restores exact list and service' test_subscription_restart_transaction
+run_case 'hardening subscription recovery failure is explicit' test_subscription_recovery
+run_case 'hardening default recreation follows shipped template' test_default_template_recreation
+run_case 'hardening decoded config byte boundaries' test_decoded_config_size
+run_case 'hardening limit enabled count boundaries' test_subscription_count_limit
+run_case 'hardening limit single download boundaries' test_subscription_download_limit
+run_case 'hardening limit cumulative download boundaries' test_subscription_total_limit
+run_case 'hardening limit generated bytes boundaries' test_subscription_generated_limit
+run_case 'hardening limit final merged bytes boundaries' test_subscription_final_limit
 
 run_case 'backup pruning combines both filename families' test_backup_pruning_combines_both_name_families
 run_case 'resolver whitespace is normalized and empty elements rejected' test_resolver_whitespace_and_empty_elements

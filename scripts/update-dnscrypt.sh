@@ -84,16 +84,14 @@ finish() {
   fi
 }
 trap finish 0
-trap 'finish; exit 129' HUP
-trap 'finish; exit 130' INT
-trap 'finish; exit 143' TERM
+# Disable EXIT before signal cleanup: mksh can otherwise replace the explicit
+# signal exit status with the successful result of the EXIT function trap.
+trap 'trap - 0; finish; exit 129' HUP
+trap 'trap - 0; finish; exit 130' INT
+trap 'trap - 0; finish; exit 143' TERM
 
 lock_fd_nonblocking() {
-  if has_cmd flock; then
-    flock -n "$1"
-    return $?
-  fi
-  busybox_cmd flock -n "$1"
+  flock_fd_nonblocking "$1"
 }
 
 acquire_update_lock() {
@@ -659,7 +657,7 @@ exec 6>&-
 
 if [ "$WAS_RUNNING" -eq 1 ]; then
   if ! DNSCRYPT_CONTROL_LOCK_HELD=1 \
-    sh "$MODDIR/scripts/dnscrypt-control.sh" restart >/dev/null 2>&1; then
+    sh "$MODDIR/scripts/dnscrypt-control.sh" restart 8>&8 >/dev/null 2>&1; then
     _rollback_ok=0
     rollback_binary >/dev/null 2>&1 && _rollback_ok=1
     _marker_restore_ok=0
@@ -669,7 +667,7 @@ if [ "$WAS_RUNNING" -eq 1 ]; then
     _recovery_ok=0
     if [ "$_rollback_ok" -eq 1 ] \
       && DNSCRYPT_CONTROL_LOCK_HELD=1 \
-        sh "$MODDIR/scripts/dnscrypt-control.sh" start >/dev/null 2>&1; then
+        sh "$MODDIR/scripts/dnscrypt-control.sh" start 8>&8 >/dev/null 2>&1; then
       _recovery_ok=1
     fi
     if [ "$_recovery_ok" -eq 1 ] && [ "$_marker_restore_ok" -eq 1 ]; then

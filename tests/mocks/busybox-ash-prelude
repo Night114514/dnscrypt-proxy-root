@@ -12,7 +12,18 @@
 # otherwise reports built-in applets such as wget and sha256sum even after the
 # corresponding mock has intentionally been removed for a fallback test.
 command() {
-  [ "${1:-}" = "-v" ] && [ "$#" -eq 2 ] || return 127
+  # Production file wrappers use `command tool ...` to bypass shell functions.
+  # Keep that execution in the fixture too, rather than rejecting it or letting
+  # BusyBox's standalone applet resolution bypass the injected test doubles.
+  if [ "${1:-}" != "-v" ]; then
+    [ "$#" -gt 0 ] || return 127
+    command_path="$MOCK_COMMAND_DIR/$1"
+    [ -x "$command_path" ] || return 127
+    shift
+    "$command_path" "$@"
+    return $?
+  fi
+  [ "$#" -eq 2 ] || return 127
   case "$2" in
     busybox) command_path="$MOCK_COMMAND_DIR/busybox-mock" ;;
     *) command_path="$MOCK_COMMAND_DIR/$2" ;;
