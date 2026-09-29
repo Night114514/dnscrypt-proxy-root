@@ -109,6 +109,34 @@ jobs:
             node --check "$file"
           done
 
+      - name: Prepare real resolver preset test inputs
+        if: matrix.shell_kind == 'dash'
+        run: |
+          resolver_ref=$(git ls-remote --exit-code https://github.com/DNSCrypt/dnscrypt-resolvers.git refs/heads/master)
+          resolver_sha=$(node -e 'const m = /^([0-9a-f]{40})\trefs\/heads\/master$/.exec(process.argv[1]); if (!m) process.exit(1); process.stdout.write(m[1]);' "$resolver_ref")
+          printf 'Resolver snapshot: %s\n' "$resolver_sha"
+          preset_dir=$(mktemp -d "$RUNNER_TEMP/resolver-presets.XXXXXX")
+          curl --fail --location --retry 2 --max-time 60 \
+            https://github.com/DNSCrypt/dnscrypt-proxy/releases/download/2.1.18/dnscrypt-proxy-linux_x86_64-2.1.18.tar.gz \
+            --output "$preset_dir/proxy.tar.gz"
+          printf '%s  %s\n' c8c8acb35b0f6619bfe8e4eed0c192672f8fd1964f467a42881905814e261c3e "$preset_dir/proxy.tar.gz" | sha256sum --check -
+          tar -xzf "$preset_dir/proxy.tar.gz" -C "$preset_dir"
+          mkdir "$preset_dir/cache"
+          for name in public-resolvers relays odoh-servers odoh-relays; do
+            for suffix in md md.minisig; do
+              curl --fail --location --retry 2 --max-time 60 \
+                "https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/$resolver_sha/v3/$name.$suffix" \
+                --output "$preset_dir/cache/$name.$suffix"
+            done
+          done
+          # The real proxy verifies these cache signatures during -check/-list.
+          printf 'DNSCRYPT_PROXY_TEST_BIN=%s/linux-x86_64/dnscrypt-proxy\n' "$preset_dir" >> "$GITHUB_ENV"
+          printf 'DNSCRYPT_RESOLVER_CACHE=%s/cache\n' "$preset_dir" >> "$GITHUB_ENV"
+
+      - name: Run real resolver preset tests
+        if: matrix.shell_kind == 'dash'
+        run: node tests/test-resolver-presets.js
+
       - name: Run WebUI bridge tests
         run: node tests/test-webui-bridge.js
 

@@ -2599,7 +2599,7 @@ rewrite_quick_mode_toml() {
         repl["dnscrypt_servers"]="dnscrypt_servers = true"; repl["doh_servers"]="doh_servers = true"; repl["odoh_servers"]="odoh_servers = false"
         repl["require_dnssec"]="require_dnssec = false"; repl["require_nolog"]="require_nolog = false"; repl["require_nofilter"]="require_nofilter = true"
       } else if (mode=="privacy") {
-        repl["server_names"]="server_names = [" sq "quad9-dnscrypt-ip4-filter-pri" sq ", " sq "mullvad-doh" sq ", " sq "adguard-dns" sq "]"
+        repl["server_names"]="server_names = []"
         repl["dnscrypt_servers"]="dnscrypt_servers = true"; repl["doh_servers"]="doh_servers = false"; repl["odoh_servers"]="odoh_servers = false"
         repl["require_dnssec"]="require_dnssec = true"; repl["require_nolog"]="require_nolog = true"; repl["require_nofilter"]="require_nofilter = false"
       } else if (mode=="family") {
@@ -2650,6 +2650,7 @@ rewrite_quick_mode_toml() {
       if (bad) exit 42
       if (mode=="privacy") {
         print "[anonymized_dns]"
+        print "  skip_incompatible = true"
         print "  routes = ["
         print "    { server_name = " sq "*" sq ", via = [" sq "anon-cs-fr" sq ", " sq "anon-cs-de" sq ", " sq "anon-tiarap" sq ", " sq "anon-kama" sq "] }"
         print "  ]"
@@ -2765,9 +2766,9 @@ quick_mode() {
     return 3
   fi
   case "$_mode" in
-    fastest) echo "Applied mode: fastest (low latency, no filtering)" ;;
-    privacy) echo "Applied mode: privacy (anonymized DNSCrypt, no-log, DNSSEC)" ;;
-    family) echo "Applied mode: family (family-safe filtering, DNSSEC)" ;;
+    fastest) echo "Applied mode: fastest (curated low-latency / non-filtering-oriented candidates)" ;;
+    privacy) echo "Applied mode: privacy (DNSCrypt metadata filtering: advertised no-logging and DNSSEC properties; incompatible resolvers skipped)" ;;
+    family) echo "Applied mode: family (curated family-filtering resolvers)" ;;
   esac
 }
 
@@ -2778,27 +2779,19 @@ get_current_mode() {
     echo "The live configuration inputs are unsafe."
     return 1
   }
-  _servers=$(awk '
-    /^[[:space:]]*\[/ { exit }
-    /^[[:space:]]*server_names[[:space:]]*=/ { print; exit }
-  ' "$CONFIG_FILE" 2>/dev/null)
-  _anon="false"
-  grep -q '^[[:space:]]*\[anonymized_dns\][[:space:]]*$' "$CONFIG_FILE" 2>/dev/null && _anon="true"
-  _nofilter=$(awk '
-    /^[[:space:]]*\[/ { exit }
-    /^[[:space:]]*require_nofilter[[:space:]]*=[[:space:]]*true[[:space:]]*$/ { found=1 }
-    END { print found + 0 }
-  ' "$CONFIG_FILE" 2>/dev/null)
-  
-  if [ "$_anon" = "true" ]; then
-    echo "privacy"
-  elif echo "$_servers" | grep -q 'family\|cleanbrowsing'; then
-    echo "family"
-  elif [ "$_nofilter" -gt 0 ]; then
-    echo "fastest"
-  else
-    echo "custom"
-  fi
+  # Recognize only the canonical output of the preset writer. Unrelated
+  # settings are preserved by that writer; a partial match is still custom.
+  # Ignore indentation and empty lines, but preserve whitespace within strings.
+  _mode_current=$(awk 'NF { sub(/^[ \t]+/, ""); sub(/[ \t\r]+$/, ""); print }' "$CONFIG_FILE") || return 1
+  for _mode_candidate in fastest privacy family; do
+    _mode_rewritten=$(rewrite_quick_mode_toml "$CONFIG_FILE" /proc/self/fd/1 "$_mode_candidate") || continue
+    _mode_rewritten=$(printf '%s\n' "$_mode_rewritten" | awk 'NF { sub(/^[ \t]+/, ""); sub(/[ \t\r]+$/, ""); print }') || return 1
+    if [ "$_mode_current" = "$_mode_rewritten" ]; then
+      echo "$_mode_candidate"
+      return 0
+    fi
+  done
+  echo "custom"
 }
 
 export_config() {

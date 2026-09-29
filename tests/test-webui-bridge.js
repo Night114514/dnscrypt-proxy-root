@@ -14,6 +14,16 @@ const indexPath = path.join(rootDir, 'webui', 'src', 'index.html');
 const bridgeSource = fs.readFileSync(bridgePath, 'utf8');
 const appSource = fs.readFileSync(appPath, 'utf8');
 const indexSource = fs.readFileSync(indexPath, 'utf8');
+assert.ok(indexSource.includes('metadata filtering: advertised no-logging and DNSSEC properties'),
+  'Privacy copy must describe advertised metadata, not a no-logging guarantee');
+assert.ok(appSource.includes('宣告不記錄日誌') && appSource.includes('声明不记录日志'),
+  'Translated privacy copy must describe the resolver declaration');
+assert.ok(indexSource.includes('Curated low-latency / non-filtering-oriented candidates.'),
+  'Fastest copy must describe curated candidates, not property enforcement');
+assert.ok(indexSource.includes('Curated family-filtering resolvers.'),
+  'Family copy must describe curated resolvers');
+assert.ok(!appSource.includes('家庭安全过滤解析器预设。') && !appSource.includes('家庭安全過濾解析器預設。'),
+  'Translated family copy must also describe curated selection');
 const marker = '__DPR_EXIT_7d393ba6__';
 
 function encodeBinary(value) {

@@ -28,6 +28,42 @@ local DNS upstream.
 The integration mode is separate from WebUI resolver presets. `strict`/`upstream_only` controls
 Android routing policy; `quick-mode` selects resolver/protocol preferences.
 
+### Resolver presets
+
+| Preset | Selection |
+|---|---|
+| `fastest` | Curated low-latency / non-filtering-oriented candidates; this is not a measured latency ranking or enforced no-filter guarantee. |
+| `privacy` | Empty `server_names`: select DNSCrypt resolvers whose metadata advertises DNSSEC and no-logging properties. Use the configured anonymized relay routes and skip incompatible resolvers. |
+| `family` | Curated family-filtering resolvers. Filtering policies are defined by those providers. |
+
+The advertised no-logging property is resolver metadata; `require_nolog` does not
+technically verify a provider's actual logging practices or guarantee no logging.
+
+When `server_names` is nonempty, upstream does **not** apply `require_dnssec`,
+`require_nolog`, or `require_nofilter` as property filters. Protocol switches still
+apply. These flags therefore do not enforce those properties for `fastest` or
+`family`. Presets leave `ipv4_servers`/`ipv6_servers` unchanged. With upstream
+2.1.18, the explicit IPv6-only `cloudflare-ipv6` candidate is excluded when
+`ipv4_servers = true` and `ipv6_servers = false`, and included when IPv6 is enabled.
+
+`get-mode` recognizes the canonical preset fields and anonymized routes emitted
+by `quick-mode`; partial matches and other configurations return `custom`.
+Recognition is conservative: alternative TOML spellings may also return `custom`.
+The shipped default resolver selection is unchanged.
+
+The real upstream integration test uses an isolated configuration snapshot and
+signed official resolver caches. It never starts a daemon:
+
+```sh
+DNSCRYPT_PROXY_TEST_BIN=/absolute/path/to/dnscrypt-proxy \
+DNSCRYPT_RESOLVER_CACHE=/absolute/path/to/signed-resolver-caches \
+node tests/test-resolver-presets.js
+```
+
+The cache directory must contain `public-resolvers`, `relays`, `odoh-servers`, and
+`odoh-relays`, each with its official `.md` and `.md.minisig` files. The test checks
+all three presets with `-check` and verifies selection using `-list -json`.
+
 ## Requirements
 
 - Target: Android 7.0+; actual support depends on device and root-manager acceptance.
