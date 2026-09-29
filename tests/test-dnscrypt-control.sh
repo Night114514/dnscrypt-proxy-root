@@ -1345,7 +1345,129 @@ start_protocol_count_daemon() {
   export MOCK_DAEMON_LIVE_COUNT
   output=$(run_control start 2>&1)
   status=$?
-  assert_eq 0 "$status" "resolver-count daemon startup failed: $output"
+  assert_eq "${2:-0}" "$status" "resolver-count daemon startup returned unexpected status: $output"
+}
+
+test_protocol_status_count_after_policy_failure() {
+  setup_protocol_resolver_fixture 'server_names = []'
+  PROTOCOL_COUNT_DAEMON=1
+  sed 's/\r$//' "$MOCK_SOURCE_DIR/dnscrypt-control-daemon" > "$MODULE_DIR/bin/dnscrypt-proxy"
+  chmod 0755 "$MODULE_DIR/bin/dnscrypt-proxy"
+  printf '%s\n' strict > "$MODULE_DIR/state/dns-mode.state"
+  MOCK_DAEMON_LIVE_COUNT=175
+  MOCK_SETTINGS_FAIL_MODE_PUT=1
+  export MOCK_DAEMON_LIVE_COUNT MOCK_SETTINGS_FAIL_MODE_PUT
+  output=$(run_control start 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail 'policy failure was reported as startup success' || return 1
+  assert_contains "$output" 'locally ready' 'policy failure lost local readiness description' || return 1
+  run_common_probe 'is_dnscrypt_ready' || fail 'policy failure killed the locally ready daemon' || return 1
+  assert_protocol_resolver_count 175
+}
+
+test_protocol_status_count_repair_on_ready_start() {
+  setup_protocol_resolver_fixture 'server_names = []'
+  start_protocol_count_daemon 175 || return 1
+  original_pid=$(cat "$MODULE_DIR/run/dnscrypt-proxy.pid")
+  for policy_outcome in success failure; do
+    rm -f "$MODULE_DIR/run/active-resolvers.state"
+    assert_protocol_resolver_count 0 || return 1
+    case "$policy_outcome" in
+      success) printf '%s\n' upstream_only > "$MODULE_DIR/state/dns-mode.state" ;;
+      failure)
+        printf '%s\n' strict > "$MODULE_DIR/state/dns-mode.state"
+        MOCK_SETTINGS_FAIL_MODE_PUT=1
+        export MOCK_SETTINGS_FAIL_MODE_PUT
+        ;;
+    esac
+    output=$(run_control start 2>&1)
+    status=$?
+    case "$policy_outcome" in
+      success) assert_eq 0 "$status" "ready repair failed: $output" || return 1 ;;
+      failure)
+        [ "$status" -ne 0 ] || fail 'failed policy repair was reported healthy' || return 1
+        assert_contains "$output" 'locally ready' 'ready daemon was not preserved' || return 1
+        ;;
+    esac
+    assert_eq "$original_pid" "$(cat "$MODULE_DIR/run/dnscrypt-proxy.pid")" 'repair replaced the ready daemon' || return 1
+    run_common_probe 'is_dnscrypt_ready' || return 1
+    assert_protocol_resolver_count 175 || return 1
+  done
+}
+
+test_protocol_status_count_publication_failure_is_visible() {
+  setup_protocol_resolver_fixture 'server_names = []'
+  MOCK_MV_MODE=fail
+  MOCK_INSTALL_TARGET="$MODULE_DIR/run/active-resolvers.state"
+  export MOCK_MV_MODE MOCK_INSTALL_TARGET
+  start_protocol_count_daemon 175 1 || return 1
+  assert_contains "$output" 'locally ready' 'publication failure hid local readiness' || return 1
+  assert_contains "$output" 'resolver count' 'publication failure was not reported' || return 1
+  run_common_probe 'is_dnscrypt_ready' || return 1
+  assert_protocol_resolver_count 0 || return 1
+  MOCK_MV_MODE=success
+  export MOCK_MV_MODE
+  output=$(run_control start 2>&1)
+  assert_eq 0 "$?" "publication retry failed: $output" || return 1
+  assert_protocol_resolver_count 175
+}
+
+test_protocol_status_count_repair_rejects_untrusted_origin() {
+  setup_protocol_resolver_fixture 'server_names = []'
+  start_protocol_count_daemon 175 || return 1
+  count_pid=$(cat "$MODULE_DIR/run/dnscrypt-proxy.pid")
+  cp "$DNSCRYPT_PROC_ROOT/$count_pid/stat" "$CURRENT_CASE_DIR/original.stat"
+  cp "$MODULE_DIR/logs/service.log" "$CURRENT_CASE_DIR/original.log"
+  rm -f "$MODULE_DIR/run/active-resolvers.state"
+  for invalid_origin in boot ticks missing replaced symlink; do
+    case "$invalid_origin" in
+      boot) printf '%s\n' another-boot > "$DNSCRYPT_PROC_SYS_ROOT/kernel/random/boot_id" ;;
+      ticks) awk '{$22=$22+1; print}' "$CURRENT_CASE_DIR/original.stat" > "$DNSCRYPT_PROC_ROOT/$count_pid/stat" ;;
+      missing) printf '%s\n' '[NOTICE] live servers: 999' > "$MODULE_DIR/logs/service.log" ;;
+      replaced|symlink)
+        mv "$MODULE_DIR/logs/service.log" "$CURRENT_CASE_DIR/moved.log"
+        if [ "$invalid_origin" = replaced ]; then
+          cp "$CURRENT_CASE_DIR/moved.log" "$MODULE_DIR/logs/service.log"
+        else
+          ln -s "$CURRENT_CASE_DIR/moved.log" "$MODULE_DIR/logs/service.log"
+        fi
+        ;;
+    esac
+    output=$(run_control start 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$invalid_origin origin was reported repaired: $output" || return 1
+    assert_protocol_resolver_count 0 || return 1
+    [ ! -e "$MODULE_DIR/run/active-resolvers.state" ] || fail "$invalid_origin origin published state" || return 1
+    case "$invalid_origin" in
+      boot) printf '%s\n' fixture-boot-id > "$DNSCRYPT_PROC_SYS_ROOT/kernel/random/boot_id" ;;
+      ticks) cp "$CURRENT_CASE_DIR/original.stat" "$DNSCRYPT_PROC_ROOT/$count_pid/stat" ;;
+      missing) cat "$CURRENT_CASE_DIR/original.log" > "$MODULE_DIR/logs/service.log" ;;
+      replaced|symlink)
+        rm "$MODULE_DIR/logs/service.log"
+        mv "$CURRENT_CASE_DIR/moved.log" "$MODULE_DIR/logs/service.log"
+        ;;
+    esac
+  done
+  run_control start >/dev/null 2>&1 || return 1
+  assert_protocol_resolver_count 175
+}
+
+test_protocol_status_count_repair_shutdown_race() {
+  setup_protocol_resolver_fixture 'server_names = []'
+  start_protocol_count_daemon 175 || return 1
+  rm -f "$MODULE_DIR/run/active-resolvers.state"
+  cat > "$TOOL_BIN/mktemp" <<'EOF'
+#!/bin/sh
+case "$1" in
+  */.active-resolvers.XXXXXX) : > "$MODULE_DIR/state/shutdown-requested" ;;
+esac
+exec "$MOCK_HOST_MKTEMP" "$@"
+EOF
+  output=$(run_control start 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail 'shutdown during repair was reported successful' || return 1
+  [ ! -e "$MODULE_DIR/run/active-resolvers.state" ] || fail 'shutdown during repair republished state' || return 1
+  assert_protocol_resolver_count 0
 }
 
 test_protocol_status_preserves_count_after_log_growth() {
@@ -1473,7 +1595,7 @@ test_protocol_status_count_state_atomic_failure() {
   MOCK_MV_MODE=fail
   MOCK_INSTALL_TARGET="$MODULE_DIR/run/active-resolvers.state"
   export MOCK_MV_MODE MOCK_INSTALL_TARGET
-  start_protocol_count_daemon 175 || return 1
+  start_protocol_count_daemon 175 1 || return 1
   assert_protocol_resolver_count 0 || return 1
   [ ! -e "$MOCK_INSTALL_TARGET" ] || fail 'failed rename published state' || return 1
   for count_temp in "$MODULE_DIR/run"/.active-resolvers.*; do
@@ -1532,7 +1654,7 @@ test_protocol_status_count_writer_rejects_symlink() {
   setup_protocol_resolver_fixture 'server_names=[]'
   printf '%s\n' preserved > "$CURRENT_CASE_DIR/count-victim"
   ln -s "$CURRENT_CASE_DIR/count-victim" "$MODULE_DIR/run/active-resolvers.state"
-  start_protocol_count_daemon 175 || return 1
+  start_protocol_count_daemon 175 1 || return 1
   assert_protocol_resolver_count 0 || return 1
   assert_eq preserved "$(cat "$CURRENT_CASE_DIR/count-victim")" 'state writer followed a symlink'
 }
@@ -1552,7 +1674,7 @@ case "$1" in
   *) exec "$MOCK_HOST_MKTEMP" "$@" ;;
 esac
 EOF
-  start_protocol_count_daemon 175 || return 1
+  start_protocol_count_daemon 175 1 || return 1
   assert_protocol_resolver_count 0 || return 1
   assert_eq preserved "$(cat "$MODULE_DIR/count-victim")" 'temporary state followed a symlink' || return 1
   assert_eq 644 "$("$HOST_STAT" -c %a "$MODULE_DIR/count-victim")" 'temporary state changed symlink target mode'
@@ -1562,7 +1684,7 @@ test_protocol_status_rejects_unsafe_service_log() {
   setup_protocol_resolver_fixture 'server_names=[]'
   mv "$MODULE_DIR/logs/service.log" "$CURRENT_CASE_DIR/untrusted.log"
   ln -s "$CURRENT_CASE_DIR/untrusted.log" "$MODULE_DIR/logs/service.log"
-  start_protocol_count_daemon 175 || return 1
+  start_protocol_count_daemon 175 1 || return 1
   assert_protocol_resolver_count 0
 }
 
@@ -3703,6 +3825,11 @@ run_case 'protocol status counts only indented explicit selections' test_protoco
 run_case 'protocol status handles multiline resolver arrays' test_protocol_status_multiline_arrays
 run_case 'protocol status reads the latest count beyond 16 MiB' test_protocol_status_large_service_log
 run_case 'protocol status preserves startup count after 17 MiB append' test_protocol_status_preserves_count_after_log_growth
+run_case 'protocol status retains count after locally-ready policy failure' test_protocol_status_count_after_policy_failure
+run_case 'protocol status repairs missing count on already-ready start' test_protocol_status_count_repair_on_ready_start
+run_case 'protocol status reports and repairs count publication failure' test_protocol_status_count_publication_failure_is_visible
+run_case 'protocol status ready repair rejects untrusted launch origins' test_protocol_status_count_repair_rejects_untrusted_origin
+run_case 'protocol status ready repair rejects shutdown during publication' test_protocol_status_count_repair_shutdown_race
 run_case 'protocol status preserves a delayed summary before 17 MiB append' test_protocol_status_count_after_delayed_summary
 run_case 'protocol status pending count validates generation and log identity' test_protocol_status_pending_count_trust
 run_case 'protocol status uses bounded trusted current-generation state' test_protocol_status_current_generation_state
