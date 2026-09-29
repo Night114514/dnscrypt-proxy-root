@@ -1261,6 +1261,78 @@ test_protocol_status_counts_auto_selected_live_resolvers() {
     "explicit resolver selection stopped counting only configured resolvers: $output"
 }
 
+setup_protocol_resolver_fixture() {
+  printf '%s\n' \
+    "user_name = '3003'" \
+    "$1" \
+    'dnscrypt_servers = true' \
+    'doh_servers = true' \
+    'odoh_servers = false' \
+    "listen_addresses = ['127.0.0.1:5354']" \
+    > "$MODULE_DIR/config/dnscrypt-proxy.toml"
+  printf '%s\n' \
+    '[NOTICE] [cloudflare] OK (DoH) - rtt: 17ms' \
+    '[NOTICE] [other-resolver] OK (DNSCrypt) - rtt: 20ms' \
+    '[NOTICE] Server with the lowest initial latency: cloudflare (rtt: 17ms), live servers: 175' \
+    > "$MODULE_DIR/logs/service.log"
+}
+
+assert_protocol_resolver_count() {
+  expected_count=$1
+  output=$(run_control protocol-status 2>&1)
+  status=$?
+  assert_eq 0 "$status" "protocol-status failed: $output" || return 1
+  assert_contains "$output" "\"active_resolvers\":$expected_count}" \
+    "protocol-status returned the wrong resolver count: $output"
+}
+
+test_protocol_status_compact_empty_array() {
+  setup_protocol_resolver_fixture 'server_names=[]'
+  assert_protocol_resolver_count 175
+}
+
+test_protocol_status_spaced_empty_array() {
+  setup_protocol_resolver_fixture '  server_names = [ ] # automatic selection'
+  assert_protocol_resolver_count 175 || return 1
+  setup_protocol_resolver_fixture 'server_names = [ ]'
+  assert_protocol_resolver_count 175
+}
+
+test_protocol_status_indented_explicit_array() {
+  setup_protocol_resolver_fixture "  server_names = ['cloudflare']"
+  assert_protocol_resolver_count 1
+}
+
+test_protocol_status_multiline_arrays() {
+  setup_protocol_resolver_fixture '  server_names = [ # automatic selection
+  ]'
+  assert_protocol_resolver_count 175 || return 1
+  setup_protocol_resolver_fixture '  server_names = [
+    "cloudflare", # this name has a successful RTT
+    "unavailable", # this name does not
+  ]'
+  assert_protocol_resolver_count 1
+}
+
+test_protocol_status_large_service_log() {
+  setup_protocol_resolver_fixture 'server_names = []'
+  # Exceed the old 16 MiB whole-file limit; keep two summaries near the tail
+  # so the latest count, rather than the first match, must be reported.
+  "$HOST_NODE" -e '
+    const fs = require("fs");
+    fs.writeFileSync(process.argv[1], Buffer.alloc(17 * 1024 * 1024, 10));
+    fs.appendFileSync(process.argv[1], "[NOTICE] live servers: 12\n[NOTICE] live servers: 175\n");
+  ' "$MODULE_DIR/logs/service.log" || return 1
+  assert_protocol_resolver_count 175
+}
+
+test_protocol_status_rejects_unsafe_service_log() {
+  setup_protocol_resolver_fixture 'server_names=[]'
+  mv "$MODULE_DIR/logs/service.log" "$CURRENT_CASE_DIR/untrusted.log"
+  ln -s "$CURRENT_CASE_DIR/untrusted.log" "$MODULE_DIR/logs/service.log"
+  assert_protocol_resolver_count 0
+}
+
 test_firewall_rule_cleanup_is_idempotent() {
   setup_ready_daemon_fixture
   printf '%s\n' strict > "$MODULE_DIR/state/dns-mode.state"
@@ -3392,6 +3464,12 @@ run_case 'custom and disabled nx_log paths are honored' test_dynamic_nx_log_path
 run_case 'DNS diagnostics use one bounded local and direct query' test_dns_test_uses_one_bounded_local_and_direct_query
 run_case 'resolver RTTs are parsed from the real proxy logs' test_resolver_rtt_log_parsing
 run_case 'protocol status counts auto-selected live resolvers' test_protocol_status_counts_auto_selected_live_resolvers
+run_case 'protocol status handles server_names=[]' test_protocol_status_compact_empty_array
+run_case 'protocol status handles spaced empty arrays' test_protocol_status_spaced_empty_array
+run_case 'protocol status counts only indented explicit selections' test_protocol_status_indented_explicit_array
+run_case 'protocol status handles multiline resolver arrays' test_protocol_status_multiline_arrays
+run_case 'protocol status reads the latest count beyond 16 MiB' test_protocol_status_large_service_log
+run_case 'protocol status rejects symlinked service logs' test_protocol_status_rejects_unsafe_service_log
 run_case 'IPv4 and IPv6 firewall cleanup is idempotent' test_firewall_rule_cleanup_is_idempotent
 run_case 'unproven same-name firewall chains are preserved' test_foreign_same_name_firewall_chains_are_never_claimed
 run_case 'lifecycle lock waits are bounded and shutdown blocks firewall commits' test_lifecycle_lock_wait_and_shutdown_interlock
