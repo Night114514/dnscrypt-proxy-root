@@ -1222,6 +1222,45 @@ test_resolver_rtt_log_parsing() {
     "ping-all did not mark unavailable RTT"
 }
 
+test_protocol_status_counts_auto_selected_live_resolvers() {
+  config_file="$MODULE_DIR/config/dnscrypt-proxy.toml"
+  printf '%s\n' \
+    "user_name = '3003'" \
+    "server_names = []" \
+    "dnscrypt_servers = true" \
+    "doh_servers = false" \
+    "odoh_servers = false" \
+    "listen_addresses = ['127.0.0.1:5354']" > "$config_file"
+  printf '%s\n' \
+    '[2026-09-29 19:11:55] Server with the lowest initial latency: cs-singapore (rtt: 74ms), live servers: 12' \
+    '[2026-09-29 19:11:56] Server with the lowest initial latency: cs-singapore (rtt: 73ms), live servers: 175' \
+    > "$MODULE_DIR/logs/service.log"
+
+  output=$(run_control protocol-status 2>&1)
+  status=$?
+  assert_eq 0 "$status" "protocol-status rejected automatic resolver selection: $output" || return 1
+  assert_contains "$output" '"active_resolvers":175' \
+    "automatic resolver selection did not report dnscrypt-proxy's live server count: $output" || return 1
+
+  printf '%s\n' \
+    "user_name = '3003'" \
+    "server_names = ['cloudflare']" \
+    "dnscrypt_servers = true" \
+    "doh_servers = true" \
+    "odoh_servers = false" \
+    "listen_addresses = ['127.0.0.1:5354']" > "$config_file"
+  printf '%s\n' \
+    '[2026-09-29 19:12:00] [cloudflare] OK (DoH) - rtt: 17ms' \
+    '[2026-09-29 19:12:00] Server with the lowest initial latency: cloudflare (rtt: 17ms), live servers: 175' \
+    > "$MODULE_DIR/logs/service.log"
+
+  output=$(run_control protocol-status 2>&1)
+  status=$?
+  assert_eq 0 "$status" "protocol-status rejected explicit resolver selection: $output" || return 1
+  assert_contains "$output" '"active_resolvers":1' \
+    "explicit resolver selection stopped counting only configured resolvers: $output"
+}
+
 test_firewall_rule_cleanup_is_idempotent() {
   setup_ready_daemon_fixture
   printf '%s\n' strict > "$MODULE_DIR/state/dns-mode.state"
@@ -3352,6 +3391,7 @@ run_case 'subscription section replacement and failed-download rollback' test_su
 run_case 'custom and disabled nx_log paths are honored' test_dynamic_nx_log_path_and_disabled_nx_log
 run_case 'DNS diagnostics use one bounded local and direct query' test_dns_test_uses_one_bounded_local_and_direct_query
 run_case 'resolver RTTs are parsed from the real proxy logs' test_resolver_rtt_log_parsing
+run_case 'protocol status counts auto-selected live resolvers' test_protocol_status_counts_auto_selected_live_resolvers
 run_case 'IPv4 and IPv6 firewall cleanup is idempotent' test_firewall_rule_cleanup_is_idempotent
 run_case 'unproven same-name firewall chains are preserved' test_foreign_same_name_firewall_chains_are_never_claimed
 run_case 'lifecycle lock waits are bounded and shutdown blocks firewall commits' test_lifecycle_lock_wait_and_shutdown_interlock
