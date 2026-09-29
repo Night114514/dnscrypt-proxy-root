@@ -1,5 +1,7 @@
 listen_addresses = ['127.0.0.1:5354']
 user_name = '3003'
+# With nonempty server_names, require_dnssec/require_nolog/require_nofilter
+# do not filter named resolvers. Protocol switches still apply.
 server_names = ['cloudflare', 'quad9-dnscrypt-ip4-filter-pri']
 max_clients = 250
 ipv4_servers = true

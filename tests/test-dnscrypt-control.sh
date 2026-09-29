@@ -2583,6 +2583,64 @@ test_startup_grace_matches_upstream_netprobe_semantics() {
   assert_eq 90 "$output" "absent netprobe_timeout did not retain upstream's 60-second default"
 }
 
+test_preset_canonical_semantics() {
+  sed 's/\r$//' "$MOCK_SOURCE_DIR/dnscrypt-control-daemon" > "$MODULE_DIR/bin/dnscrypt-proxy"
+  chmod 0755 "$MODULE_DIR/bin/dnscrypt-proxy"
+  config="$MODULE_DIR/config/dnscrypt-proxy.toml"
+  for preset in privacy family fastest; do
+    output=$(run_control quick-mode "$preset" 2>&1)
+    assert_eq 0 "$?" "$preset apply failed: $output" || return 1
+    assert_file_contains "$config" 'ipv4_servers = true' 'preset changed IPv4 eligibility' || return 1
+    assert_file_contains "$config" 'ipv6_servers = false' 'preset changed IPv6 eligibility' || return 1
+    case "$preset" in
+      privacy)
+        for setting in 'server_names = []' 'dnscrypt_servers = true' 'doh_servers = false' 'odoh_servers = false' 'require_dnssec = true' 'require_nolog = true' 'require_nofilter = false' 'skip_incompatible = true'; do
+          assert_file_contains "$config" "$setting" "privacy omitted $setting" || return 1
+        done
+        assert_file_not_contains "$config" mullvad-doh 'privacy retained obsolete named resolver' || return 1
+        assert_file_contains "$config" "via = ['anon-cs-fr', 'anon-cs-de', 'anon-tiarap', 'anon-kama']" 'privacy changed relay routes' || return 1
+        ;;
+      family)
+        assert_file_contains "$config" "server_names = ['cloudflare-family', 'adguard-dns-family', 'cleanbrowsing-family']" 'family stopped using curated names' || return 1
+        assert_contains "$output" 'curated family-filtering resolvers' 'family CLI claims unsupported enforcement' || return 1
+        ;;
+      fastest)
+        assert_file_contains "$config" "server_names = ['cloudflare', 'google', 'nextdns', 'cloudflare-ipv6']" 'fastest stopped using curated names' || return 1
+        assert_contains "$output" 'curated low-latency / non-filtering-oriented candidates' 'fastest CLI claims no filtering enforcement' || return 1
+        ;;
+    esac
+      output=$(run_control get-mode 2>&1)
+      assert_eq "$preset" "$output" 'canonical preset was not recognized' || return 1
+      cp "$config" "$CURRENT_CASE_DIR/canonical"
+      case "$preset" in
+        privacy) sed 's/skip_incompatible = true/skip_incompatible = false/' "$config" > "$config.new" ;;
+        fastest) sed 's/doh_servers = true/doh_servers = false/' "$config" > "$config.new" ;;
+        family) sed 's/require_nolog = true/require_nolog = false/' "$config" > "$config.new" ;;
+      esac
+      mv "$config.new" "$config"
+      chmod 0600 "$config"
+      output=$(run_control get-mode 2>&1)
+      assert_eq custom "$output" 'partial preset signature was incorrectly recognized' || return 1
+      cp "$CURRENT_CASE_DIR/canonical" "$config"
+  done
+}
+
+test_preset_custom_false_positives() {
+  config="$MODULE_DIR/config/dnscrypt-proxy.toml"
+  cp "$config" "$CURRENT_CASE_DIR/original"
+  for custom_case in anonymized nofilter family_name; do
+    cp "$CURRENT_CASE_DIR/original" "$config"
+    case "$custom_case" in
+      anonymized) printf '\n[anonymized_dns]\nroutes = []\n' >> "$config" ;;
+      nofilter) sed 's/require_nofilter = false/require_nofilter = true/' "$config" > "$config.new"; mv "$config.new" "$config" ;;
+      family_name) sed "s/^server_names =.*/server_names = ['custom-family']/" "$config" > "$config.new"; mv "$config.new" "$config" ;;
+    esac
+    chmod 0600 "$config"
+    output=$(run_control get-mode 2>&1)
+    assert_eq custom "$output" "$custom_case was falsely recognized as a preset" || return 1
+  done
+}
+
 write_quick_mode_fixture() {
   printf '%s\n' \
     "user_name = '3003'" \
@@ -3259,6 +3317,9 @@ run_case() {
 }
 
 echo "Running dnscrypt-control tests with $TEST_SHELL_KIND"
+
+run_case 'preset canonical resolver semantics and CLI wording' test_preset_canonical_semantics
+run_case 'preset custom configurations are never guessed from one field' test_preset_custom_false_positives
 
 run_case 'portability timeout absolute and standalone applet discovery' test_query_timeout_absolute_and_standalone
 run_case 'portability timeout rejects unsafe executables and ancestry' test_query_timeout_rejects_unsafe_paths
