@@ -1474,9 +1474,15 @@ start_service() {
   }
   if is_dnscrypt_running; then
     if is_dnscrypt_ready; then
+      rm -f "$STARTUP_STATE_FILE" "$USER_STOPPED_FILE"
+      _resolver_count_ready=0
+      prepare_ready_resolver_count && _resolver_count_ready=1
       if reconcile_running_policy "$_start_mode"; then
-        rm -f "$STARTUP_STATE_FILE"
-        rm -f "$USER_STOPPED_FILE"
+        if [ "$_resolver_count_ready" -ne 1 ]; then
+          write_start_failure state_record_failed >/dev/null 2>&1 || true
+          echo "dnscrypt-proxy is locally ready, but its current-generation resolver count requires repair."
+          return 1
+        fi
         echo "dnscrypt-proxy is already running; $_start_mode policy refreshed."
         return 0
       fi
@@ -1648,6 +1654,11 @@ start_service() {
     return 1
   fi
   rm -f "$STARTUP_STATE_FILE"
+  # Resolver startup state belongs to the locally ready generation, even if
+  # policy reconciliation subsequently preserves it with a nonzero result.
+  _resolver_count_ready=0
+  prepare_ready_resolver_count "$_started_resolver_generation" "$_resolver_log_origin" \
+    && _resolver_count_ready=1
   if ! reconcile_running_policy "$_start_mode"; then
     write_start_failure policy_install_failed >/dev/null 2>&1 || true
     log_msg "$SERVICE_LOG" "$_start_mode policy installation failed; the locally ready daemon was preserved without global redirection."
@@ -1680,8 +1691,10 @@ start_service() {
     echo "dnscrypt-proxy is healthy, but promoted-binary finalization requires repair."
     return 3
   fi
-  if ! publish_active_resolver_count "$_started_resolver_generation" "$_resolver_log_origin" >/dev/null; then
-    log_msg "$CONTROL_LOG" "Current-generation live resolver count is unavailable."
+  if [ "$_resolver_count_ready" -ne 1 ]; then
+    write_start_failure state_record_failed >/dev/null 2>&1 || true
+    echo "dnscrypt-proxy is locally ready, but its current-generation resolver count requires repair."
+    return 1
   fi
   log_msg "$SERVICE_LOG" "dnscrypt-proxy started with PID $_actual_pid under UID $DNSCRYPT_UID in $_start_mode mode."
   echo "dnscrypt-proxy started in $_start_mode mode."
@@ -2355,6 +2368,36 @@ active_resolver_log_origin() (
   stat -c '%d:%i:%s' "$SERVICE_LOG"
 )
 
+# Called under the lifecycle lock after local readiness, before policy work.
+# The launch-origin receipt allows an explicit start to repair a missing state
+# without guessing which historical summary belongs to the running daemon.
+prepare_ready_resolver_count() (
+  _count_selected=$(protocol_selected_resolvers) || return 1
+  [ -z "$_count_selected" ] || return 0
+  active_resolver_paths_trusted || return 1
+  shutdown_requested && return 1
+  _count_generation=$(active_resolver_generation "$(dnscrypt_pid)") || return 1
+  if [ "$#" -eq 2 ]; then
+    [ "$1" = "$_count_generation" ] || return 1
+    _count_origin=$2
+    _count_log_identity=$(active_resolver_log_origin) || return 1
+    [ -n "$_count_origin" ] && [ "${_count_origin%:*}" = "${_count_log_identity%:*}" ] || return 1
+    log_msg "$SERVICE_LOG" "dnscrypt-resolver-origin=v1 $_count_generation $_count_origin" || return 1
+  else
+    auto_selected_live_resolver_count >/dev/null && return 0
+    _count_log_identity=$(active_resolver_log_origin) || return 1
+    _count_origin=$(bounded_diagnostic_command 8 awk -v generation="$_count_generation" '
+      { sub(/^\[[^]]*\] /, "") }
+      NF==5 && $1=="dnscrypt-resolver-origin=v1" && $2 " " $3 " " $4==generation \
+        && $5 ~ /^[0-9]+:[0-9]+:[0-9]+$/ { print $5; exit }
+    ' "$SERVICE_LOG") || return 1
+    [ -n "$_count_origin" ] || return 1
+    _count_after=$(active_resolver_log_origin) || return 1
+    [ "${_count_log_identity%:*}" = "${_count_after%:*}" ] || return 1
+  fi
+  publish_active_resolver_count "$_count_generation" "$_count_origin" >/dev/null
+)
+
 publish_active_resolver_count() (
   _count_generation=$1
   _count_origin=$2
@@ -2404,6 +2447,9 @@ publish_active_resolver_count() (
     && [ "$(stat -c '%u:%g:%a' "$_count_tmp")" = "$(config_control_uid):0:600" ] || return 1
   printf 'v1 %s %s\n' "$_count_generation" "$_count_value" > "$_count_tmp" || return 1
   active_resolver_paths_trusted || return 1
+  shutdown_requested && return 1
+  [ ! -e "$USER_STOPPED_FILE" ] && [ ! -e "$STARTUP_STATE_FILE" ] || return 1
+  [ "$(active_resolver_generation "$_count_pid")" = "$_count_generation" ] || return 1
   mv -f "$_count_tmp" "$ACTIVE_RESOLVERS_STATE" || return 1
   case "$_count_value" in pending*) ;; *) printf '%s\n' "$_count_value" ;; esac
 )
