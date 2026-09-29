@@ -151,6 +151,7 @@ mkdir -p "$proc_dir/fd" "$DNSCRYPT_PROC_ROOT/net"
 printf '%s\0%s\0%s\0' "$0" '-config' "$config_argument" \
   > "$proc_dir/cmdline"
 printf 'Uid:\t3003\t3003\t3003\t3003\n' > "$proc_dir/status"
+cat "/proc/$$/stat" > "$proc_dir/stat"
 case "${MOCK_DAEMON_START_MODE:-success}" in
   no_listener) exec "$MOCK_HOST_SLEEP" 300 ;;
   no_listener_shutdown)
@@ -158,6 +159,9 @@ case "${MOCK_DAEMON_START_MODE:-success}" in
     exec "$MOCK_HOST_SLEEP" 300
     ;;
 esac
+if [ -n "${MOCK_DAEMON_LIVE_COUNT:-}" ]; then
+  printf '[NOTICE] live servers: %s\n' "$MOCK_DAEMON_LIVE_COUNT"
+fi
 printf 'socket:[311]\n' > "$proc_dir/fd/3"
 printf 'socket:[322]\n' > "$proc_dir/fd/4"
 printf '%s\n' \
