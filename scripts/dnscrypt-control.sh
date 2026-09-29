@@ -2292,6 +2292,31 @@ resolver_latency_from_log() {
   return 1
 }
 
+auto_selected_live_resolver_count_from_log() {
+  # When server_names is empty, dnscrypt-proxy automatically selects every
+  # resolver matching the configured metadata filters. In that mode there are
+  # no explicit names for list_resolvers to enumerate, so use dnscrypt-proxy's
+  # own startup summary instead of reporting a misleading zero.
+  _live_proxy_log=$(proxy_log_path 2>/dev/null || true)
+  for _live_log in "$_live_proxy_log" "$SERVICE_LOG"; do
+    [ -n "$_live_log" ] || continue
+    log_file_is_safe_for_read "$_live_log" || continue
+    _live_count=$(awk '
+      match($0, /live servers: [0-9][0-9]*/) {
+        value = substr($0, RSTART, RLENGTH)
+        sub(/^live servers: /, "", value)
+        latest = value
+      }
+      END { if (latest != "") print latest }
+    ' "$_live_log" 2>/dev/null)
+    case "$_live_count" in
+      ""|*[!0-9]*) ;;
+      *) printf '%s' "$_live_count"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
 show_logs() {
   lines="${2:-160}"
   case "$lines" in ""|*[!0-9]*) lines=160 ;; esac
@@ -2504,13 +2529,23 @@ protocol_status() {
     fi
     rm -f "$_protocol_probe"
   fi
-  # Count selected resolvers with a successful upstream probe in the log.
+  # Count explicit selections by their successful startup probes. An empty
+  # server_names list means dnscrypt-proxy auto-selects the eligible pool, so
+  # there are no names to enumerate; use its latest startup live-server count.
   _active_resolvers=0
   _selected_resolvers=$(list_resolvers)
-  for _selected in $_selected_resolvers; do
-    resolver_latency_from_log "$_selected" >/dev/null 2>&1 \
-      && _active_resolvers=$((_active_resolvers + 1))
-  done
+  if [ -n "$_selected_resolvers" ]; then
+    for _selected in $_selected_resolvers; do
+      resolver_latency_from_log "$_selected" >/dev/null 2>&1 \
+        && _active_resolvers=$((_active_resolvers + 1))
+    done
+  else
+    _auto_live_resolvers=$(auto_selected_live_resolver_count_from_log 2>/dev/null || true)
+    case "$_auto_live_resolvers" in
+      ""|*[!0-9]*) ;;
+      *) _active_resolvers=$_auto_live_resolvers ;;
+    esac
+  fi
   printf '{"dnscrypt":%s,"doh":%s,"odoh":%s,"anonymized":%s,"running":%s,"quality":"%s","active_resolvers":%d}\n' \
     "$([ $_dnscrypt -gt 0 ] && echo true || echo false)" \
     "$([ $_doh -gt 0 ] && echo true || echo false)" \
