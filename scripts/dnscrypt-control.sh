@@ -2300,15 +2300,35 @@ auto_selected_live_resolver_count_from_log() {
   _live_proxy_log=$(proxy_log_path 2>/dev/null || true)
   for _live_log in "$_live_proxy_log" "$SERVICE_LOG"; do
     [ -n "$_live_log" ] || continue
-    log_file_is_safe_for_read "$_live_log" || continue
-    _live_count=$(awk '
+    if [ "$_live_log" = "$SERVICE_LOG" ]; then
+      # This append-only log may exceed the whole-file read limit. Only the
+      # control-owned regular file in the trusted module log directory gets
+      # this exception; daemon-writable log paths retain their existing guard.
+      [ -d "$MODDIR" ] && [ ! -L "$MODDIR" ] || continue
+      [ -d "$LOG_DIR" ] && [ ! -L "$LOG_DIR" ] || continue
+      [ -f "$_live_log" ] && [ ! -L "$_live_log" ] || continue
+      _live_control_uid=$(config_control_uid) || continue
+      _live_trusted=true
+      for _live_path in "$MODDIR" "$LOG_DIR" "$_live_log"; do
+        [ "$(stat -c %u "$_live_path" 2>/dev/null)" = "$_live_control_uid" ] \
+          || _live_trusted=false
+        case "$(stat -c %a "$_live_path" 2>/dev/null)" in
+          [0-7][0145][0145]) ;;
+          *) _live_trusted=false ;;
+        esac
+      done
+      [ "$_live_trusted" = true ] || continue
+    else
+      log_file_is_safe_for_read "$_live_log" || continue
+    fi
+    _live_count=$(bounded_diagnostic_command 8 tail -c 16777216 "$_live_log" 2>/dev/null | awk '
       match($0, /live servers: [0-9][0-9]*/) {
         value = substr($0, RSTART, RLENGTH)
         sub(/^live servers: /, "", value)
         latest = value
       }
       END { if (latest != "") print latest }
-    ' "$_live_log" 2>/dev/null)
+    ')
     case "$_live_count" in
       ""|*[!0-9]*) ;;
       *) printf '%s' "$_live_count"; return 0 ;;
@@ -2503,6 +2523,53 @@ ping_all_resolvers() {
   printf ']\n'
 }
 
+# Read the root server_names string array for protocol-status only. Whitespace,
+# comments and line breaks do not determine whether selection is automatic.
+# Resolver identifiers follow set-resolvers syntax; unsupported/malformed
+# values fail closed rather than being mistaken for an empty automatic list.
+protocol_selected_resolvers() {
+  awk '
+    BEGIN { sq=sprintf("%c",39); dq=sprintf("%c",34); state="start" }
+    !found {
+      if ($0 ~ /^[ \t]*\[/) exit
+      line=$0
+      key="^[ \t]*(server_names|" dq "server_names" dq "|" sq "server_names" sq ")[ \t]*="
+      if (line !~ key) next
+      sub(key, "", line)
+      found=1
+    }
+    found {
+      if (line_set) line=$0
+      line_set=1
+      for (i=1; i<=length(line); i++) {
+        c=substr(line,i,1)
+        if (state=="string") {
+          if (c==quote) {
+            if (name=="") { bad=1; exit }
+            names=names name "\n"; state="comma"
+          } else if (c ~ /[A-Za-z0-9._-]/) name=name c
+          else { bad=1; exit }
+          continue
+        }
+        if (c=="#") break
+        if (c ~ /[ \t\r]/) continue
+        if (state=="start" && c=="[") state="value"
+        else if (state=="value" && (c==sq || c==dq)) {
+          quote=c; name=""; state="string"
+        } else if ((state=="value" || state=="comma") && c=="]") state="done"
+        else if (state=="comma" && c==",") state="value"
+        else { bad=1; exit }
+      }
+      if (state=="string") { bad=1; exit }
+      if (state=="done") exit
+    }
+    END {
+      if (bad || (found && state!="done")) exit 1
+      printf "%s", names
+    }
+  ' "$CONFIG_FILE"
+}
+
 protocol_status() {
   # Return JSON with current protocol configuration and connection quality
   ensure_config || { echo '{"error":"unsafe configuration inputs"}'; return 1; }
@@ -2533,8 +2600,9 @@ protocol_status() {
   # server_names list means dnscrypt-proxy auto-selects the eligible pool, so
   # there are no names to enumerate; use its latest startup live-server count.
   _active_resolvers=0
-  _selected_resolvers=$(list_resolvers)
-  if [ -n "$_selected_resolvers" ]; then
+  if ! _selected_resolvers=$(protocol_selected_resolvers); then
+    _active_resolvers=0
+  elif [ -n "$_selected_resolvers" ]; then
     for _selected in $_selected_resolvers; do
       resolver_latency_from_log "$_selected" >/dev/null 2>&1 \
         && _active_resolvers=$((_active_resolvers + 1))
