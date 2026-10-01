@@ -121,34 +121,60 @@ UPDATE_LOG="$LOG_DIR/update.log"
 SERVICE_LOG="$LOG_DIR/service.log"
 CONTROL_LOG="$LOG_DIR/control.log"
 
+private_root_directory_is_trusted() (
+  [ -d "$1" ] && [ ! -L "$1" ] || return 1
+  case "$(stat -c '%u:%g:%a' "$1" 2>/dev/null)" in
+    0:0:[0-7][0145][0145]) return 0 ;;
+    *) return 1 ;;
+  esac
+)
+
+# Never chmod/chown an unsafe existing directory into appearing trusted.
+# Installer staging uses these same private defaults; UID3003 runtime paths
+# have their own explicit ownership and modes in ensure_runtime_tree.
 mkdir -p "$STATE_DIR" "$RUN_DIR" "$LOG_DIR" "$TMP_BASE" 2>/dev/null
-chmod 0700 "$STATE_DIR" 2>/dev/null || true
-chown 0:0 "$STATE_DIR" 2>/dev/null || true
+if private_root_directory_is_trusted "$MODDIR" \
+  && private_root_directory_is_trusted "$STATE_DIR"; then
+  chmod 0700 "$STATE_DIR" 2>/dev/null || true
+fi
 
 # Installer-time permissions cover files that already exist while a module is
 # staged, but service.log/PID/lock/status files are commonly created later at
 # boot. Repair only known regular root-owned files; never follow a symlink or
 # adopt an unexpected owner merely to make a trust check pass.
-repair_private_root_file() {
+repair_private_root_file() (
   _private_path=$1
   if [ ! -e "$_private_path" ] && [ ! -L "$_private_path" ]; then
     return 0
   fi
+  case "$_private_path" in
+    "$LOG_DIR/"*|"$RUN_DIR/"*|"$STATE_DIR/"*) ;;
+    *) return 1 ;;
+  esac
+  _private_parent=${_private_path%/*}
+  case "$_private_parent" in "$LOG_DIR"|"$RUN_DIR"|"$STATE_DIR") ;; *) return 1 ;; esac
+  private_root_directory_is_trusted "$MODDIR" \
+    && private_root_directory_is_trusted "$_private_parent" || return 1
   [ -f "$_private_path" ] && [ ! -L "$_private_path" ] || return 1
-  [ "$(stat -c '%u:%g' "$_private_path" 2>/dev/null)" = "0:0" ] || return 1
-  chmod 0600 "$_private_path"
-}
+  case "$(stat -c '%u:%g:%a' "$_private_path" 2>/dev/null)" in
+    0:0:600) return 0 ;;
+    0:0:*) chmod 0600 "$_private_path" ;;
+    *) return 1 ;;
+  esac
+)
 
 for _private_path in \
   "$SERVICE_LOG" "$UPDATE_LOG" "$CONTROL_LOG" \
   "$PID_FILE" "$WATCHDOG_PID_FILE" \
   "$SERVICE_LOCK_FILE" "$RUNTIME_LOCK_FILE" \
+  "$RUN_DIR/update.lock" "$RUN_DIR/update.lock.guard" "$RUN_DIR/update.lock.reap" \
+  "$RUN_DIR/watchdog-start.lock" "$RUN_DIR/last-update-check" \
   "$INSTALLED_VERSION_FILE" "$USER_STOPPED_FILE" \
   "$UPDATE_STATUS_FILE" "$STARTUP_STATE_FILE" \
   "$START_FAILURE_STATE_FILE" "$UPSTREAM_STATUS_FILE" \
   "$PRIVATE_DNS_STATE_FILE" "$DNS_MODE_STATE_FILE" \
   "$FIREWALL_OWNERSHIP_FILE" "$LEGACY_FIREWALL_ADOPTION_FILE" \
-  "$LEGACY_IPV6_REBOOT_FILE" "$RUNTIME_OPERATION_FILE"
+  "$LEGACY_IPV6_REBOOT_FILE" "$RUNTIME_OPERATION_FILE" "$MODULE_SHUTDOWN_FILE"
 do
   repair_private_root_file "$_private_path" >/dev/null 2>&1 || true
 done
