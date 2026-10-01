@@ -96,6 +96,7 @@ if [ -n "${MOCK_STAT_UNTRUSTED_PATH:-}" ] \
   mock_untrusted_uid=${MOCK_STAT_UNTRUSTED_UID:-3003}
   case "$2" in
     %u) printf '%s\n' "$mock_untrusted_uid"; exit 0 ;;
+    %u:%g) printf '%s:0\n' "$mock_untrusted_uid"; exit 0 ;;
     %u:%g:%a)
       mock_untrusted_identity=$(mock_runtime_identity "$3" 2>/dev/null || true)
       mock_untrusted_gid=${mock_untrusted_identity#*:}
