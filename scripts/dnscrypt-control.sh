@@ -9,6 +9,7 @@ ACTION="${1:-status}"
 IMPORT_TRANSACTION_FILE="$RUN_DIR/config-import.transaction"
 IMPORT_BACKUP_DIR="$RUN_DIR/config-generation-backup"
 CONTROL_LOCK_ACQUIRED=0
+ACTIVE_RESOLVERS_STATE="$RUN_DIR/active-resolvers.state"
 
 # Backend resource budgets (decoded bytes); keep transport policy separate.
 CONFIG_MAX_BYTES=65536
@@ -1473,9 +1474,15 @@ start_service() {
   }
   if is_dnscrypt_running; then
     if is_dnscrypt_ready; then
+      rm -f "$STARTUP_STATE_FILE" "$USER_STOPPED_FILE"
+      _resolver_count_ready=0
+      prepare_ready_resolver_count && _resolver_count_ready=1
       if reconcile_running_policy "$_start_mode"; then
-        rm -f "$STARTUP_STATE_FILE"
-        rm -f "$USER_STOPPED_FILE"
+        if [ "$_resolver_count_ready" -ne 1 ]; then
+          write_start_failure state_record_failed >/dev/null 2>&1 || true
+          echo "dnscrypt-proxy is locally ready, but its current-generation resolver count requires repair."
+          return 1
+        fi
         echo "dnscrypt-proxy is already running; $_start_mode policy refreshed."
         return 0
       fi
@@ -1500,6 +1507,7 @@ start_service() {
   # Keep the system fail-open while dnscrypt-proxy performs its upstream
   # NetProbe. Stale redirection would blackhole DNS before the local TCP and UDP
   # listeners exist.
+  clear_active_resolver_count || true
   if ! remove_iptables >/dev/null 2>&1 || ! restore_private_dns >/dev/null 2>&1; then
     write_start_failure cleanup_failed >/dev/null 2>&1 || true
     echo "Failed to clear stale DNS policy before startup."
@@ -1572,6 +1580,7 @@ start_service() {
   # so the long-running daemon cannot keep a parent's advisory lock alive.
   _start_log_marker="dnscrypt-start-attempt=$$-$(date +%s 2>/dev/null || echo 0)"
   log_msg "$SERVICE_LOG" "$_start_log_marker"
+  _resolver_log_origin=$(active_resolver_log_origin 2>/dev/null || true)
   if ! launch_dnscrypt_runtime_uid; then
     _start_failure=$(classify_start_failure_since "$_start_log_marker")
     [ "$_start_failure" != none ] || _start_failure=process_exit
@@ -1584,6 +1593,7 @@ start_service() {
     return 1
   fi
   _started_pid=$LAUNCHED_DNSCRYPT_PID
+  _started_resolver_generation=$(active_resolver_generation "$_started_pid" 2>/dev/null || true)
   _pid_tmp="$PID_FILE.$$.tmp"
   printf '%s\n' "$_started_pid" > "$_pid_tmp" && mv -f "$_pid_tmp" "$PID_FILE" || {
     rm -f "$_pid_tmp"
@@ -1644,6 +1654,11 @@ start_service() {
     return 1
   fi
   rm -f "$STARTUP_STATE_FILE"
+  # Resolver startup state belongs to the locally ready generation, even if
+  # policy reconciliation subsequently preserves it with a nonzero result.
+  _resolver_count_ready=0
+  prepare_ready_resolver_count "$_started_resolver_generation" "$_resolver_log_origin" \
+    && _resolver_count_ready=1
   if ! reconcile_running_policy "$_start_mode"; then
     write_start_failure policy_install_failed >/dev/null 2>&1 || true
     log_msg "$SERVICE_LOG" "$_start_mode policy installation failed; the locally ready daemon was preserved without global redirection."
@@ -1676,12 +1691,18 @@ start_service() {
     echo "dnscrypt-proxy is healthy, but promoted-binary finalization requires repair."
     return 3
   fi
+  if [ "$_resolver_count_ready" -ne 1 ]; then
+    write_start_failure state_record_failed >/dev/null 2>&1 || true
+    echo "dnscrypt-proxy is locally ready, but its current-generation resolver count requires repair."
+    return 1
+  fi
   log_msg "$SERVICE_LOG" "dnscrypt-proxy started with PID $_actual_pid under UID $DNSCRYPT_UID in $_start_mode mode."
   echo "dnscrypt-proxy started in $_start_mode mode."
   return 0
 }
 
 terminate_dnscrypt_process() {
+  clear_active_resolver_count || true
   _terminate_count=0
   while [ "$_terminate_count" -lt 16 ]; do
     pid=$(dnscrypt_pid 2>/dev/null || true)
@@ -2292,6 +2313,178 @@ resolver_latency_from_log() {
   return 1
 }
 
+# The count belongs to a boot/PID/kernel-start-time tuple, never just a PID or
+# a historical log line. All helpers use subshells to isolate lifecycle globals.
+active_resolver_generation() (
+  _count_pid=$1
+  is_dnscrypt_pid "$_count_pid" || return 1
+  [ "$(dnscrypt_process_uid "$_count_pid")" = "$DNSCRYPT_UID" ] || return 1
+  _count_boot=$(cat "$PROC_SYS_ROOT/kernel/random/boot_id" 2>/dev/null) || return 1
+  case "$_count_boot" in ""|*[!A-Za-z0-9-]*) return 1 ;; esac
+  [ "${#_count_boot}" -le 64 ] || return 1
+  _count_ticks=$(awk '
+    { sub(/^.*\) /, ""); if (NF>=20 && $1!="Z" && $20 ~ /^[0-9]+$/) print $20 }
+  ' "$PROC_ROOT/$_count_pid/stat" 2>/dev/null) || return 1
+  case "$_count_ticks" in ""|*[!0-9]*) return 1 ;; esac
+  [ "${#_count_ticks}" -le 20 ] && [ "${#_count_pid}" -le 10 ] || return 1
+  is_dnscrypt_pid "$_count_pid" || return 1
+  printf '%s %s %s\n' "$_count_boot" "$_count_pid" "$_count_ticks"
+)
+
+active_resolver_paths_trusted() (
+  _count_uid=$(config_control_uid) || return 1
+  for _count_dir in "$MODDIR" "$RUN_DIR"; do
+    [ -d "$_count_dir" ] && [ ! -L "$_count_dir" ] || return 1
+    [ "$(stat -c %u "$_count_dir" 2>/dev/null)" = "$_count_uid" ] || return 1
+    case "$(stat -c %a "$_count_dir" 2>/dev/null)" in
+      [0-7][0145][0145]) ;;
+      *) return 1 ;;
+    esac
+  done
+  if [ -e "$ACTIVE_RESOLVERS_STATE" ] || [ -L "$ACTIVE_RESOLVERS_STATE" ]; then
+    [ -f "$ACTIVE_RESOLVERS_STATE" ] && [ ! -L "$ACTIVE_RESOLVERS_STATE" ] \
+      && [ "$(stat -c '%u:%g:%a' "$ACTIVE_RESOLVERS_STATE" 2>/dev/null)" = \
+        "$_count_uid:0:600" ] || return 1
+  fi
+)
+
+clear_active_resolver_count() {
+  active_resolver_paths_trusted || return 1
+  rm -f "$ACTIVE_RESOLVERS_STATE"
+}
+
+active_resolver_log_origin() (
+  _count_uid=$(config_control_uid) || return 1
+  [ -d "$MODDIR" ] && [ ! -L "$MODDIR" ] || return 1
+  [ -d "$LOG_DIR" ] && [ ! -L "$LOG_DIR" ] || return 1
+  [ -f "$SERVICE_LOG" ] && [ ! -L "$SERVICE_LOG" ] || return 1
+  for _count_path in "$MODDIR" "$LOG_DIR" "$SERVICE_LOG"; do
+    [ "$(stat -c %u "$_count_path" 2>/dev/null)" = "$_count_uid" ] || return 1
+    case "$(stat -c %a "$_count_path" 2>/dev/null)" in
+      [0-7][0145][0145]) ;;
+      *) return 1 ;;
+    esac
+  done
+  stat -c '%d:%i:%s' "$SERVICE_LOG"
+)
+
+# Called under the lifecycle lock after local readiness, before policy work.
+# The launch-origin receipt allows an explicit start to repair a missing state
+# without guessing which historical summary belongs to the running daemon.
+prepare_ready_resolver_count() (
+  _count_selected=$(protocol_selected_resolvers) || return 1
+  [ -z "$_count_selected" ] || return 0
+  active_resolver_paths_trusted || return 1
+  shutdown_requested && return 1
+  _count_generation=$(active_resolver_generation "$(dnscrypt_pid)") || return 1
+  if [ "$#" -eq 2 ]; then
+    [ "$1" = "$_count_generation" ] || return 1
+    _count_origin=$2
+    _count_log_identity=$(active_resolver_log_origin) || return 1
+    [ -n "$_count_origin" ] && [ "${_count_origin%:*}" = "${_count_log_identity%:*}" ] || return 1
+    log_msg "$SERVICE_LOG" "dnscrypt-resolver-origin=v1 $_count_generation $_count_origin" || return 1
+  else
+    auto_selected_live_resolver_count >/dev/null && return 0
+    _count_log_identity=$(active_resolver_log_origin) || return 1
+    _count_origin=$(bounded_diagnostic_command 8 awk -v generation="$_count_generation" '
+      { sub(/^\[[^]]*\] /, "") }
+      NF==5 && $1=="dnscrypt-resolver-origin=v1" && $2 " " $3 " " $4==generation \
+        && $5 ~ /^[0-9]+:[0-9]+:[0-9]+$/ { print $5; exit }
+    ' "$SERVICE_LOG") || return 1
+    [ -n "$_count_origin" ] || return 1
+    _count_after=$(active_resolver_log_origin) || return 1
+    [ "${_count_log_identity%:*}" = "${_count_after%:*}" ] || return 1
+  fi
+  publish_active_resolver_count "$_count_generation" "$_count_origin" >/dev/null
+)
+
+publish_active_resolver_count() (
+  _count_generation=$1
+  _count_origin=$2
+  active_resolver_paths_trusted || return 1
+  [ -n "$_count_generation" ] && [ -n "$_count_origin" ] || return 1
+  _count_pid=$(printf '%s\n' "$_count_generation" | awk '{print $2}')
+  [ "$(active_resolver_generation "$_count_pid")" = "$_count_generation" ] || return 1
+  _count_current_origin=$(active_resolver_log_origin) || return 1
+  [ "${_count_origin%:*}" = "${_count_current_origin%:*}" ] || return 1
+  _count_offset=${_count_origin##*:}
+  case "$_count_offset" in ""|*[!0-9]*) return 1 ;; esac
+  [ "${_count_current_origin##*:}" -ge "$_count_offset" ] || return 1
+  # Seek to this launch, not EOF. Stop at its startup summary, so arbitrary
+  # later appends cannot move that summary outside a byte window. Timeout
+  # bounds missing-summary reads; no old generations are scanned as fallback.
+  _count_value=$(bounded_diagnostic_command 8 tail -c "+$((_count_offset + 1))" "$SERVICE_LOG" 2>/dev/null | awk '
+    match($0, /live servers: [0-9][0-9]*/) {
+      value=substr($0,RSTART,RLENGTH); sub(/^live servers: /,"",value)
+      print value; exit
+    }
+  ')
+  if [ -z "$_count_value" ]; then
+    # Upstream starts accepting local queries before its resolver refresh.
+    # Keep the trusted launch origin until a later root control read can
+    # complete the count under the same lifecycle lock and generation.
+    [ "${3:-0}" = 0 ] || return 1
+    _count_value="pending $_count_origin"
+  else
+    case "$_count_value" in *[!0-9]*) return 1 ;; esac
+    [ "${#_count_value}" -le 9 ] || return 1
+  fi
+  _count_current_origin=$(active_resolver_log_origin) || return 1
+  [ "${_count_origin%:*}" = "${_count_current_origin%:*}" ] || return 1
+  shutdown_requested && return 1
+  [ ! -e "$USER_STOPPED_FILE" ] && [ ! -e "$STARTUP_STATE_FILE" ] || return 1
+  [ "$(active_resolver_generation "$_count_pid")" = "$_count_generation" ] || return 1
+  umask 077
+  _count_tmp=$(mktemp "$RUN_DIR/.active-resolvers.XXXXXX") || return 1
+  case "$_count_tmp" in "$RUN_DIR/.active-resolvers."*) ;; *) return 1 ;; esac
+  _count_suffix=${_count_tmp#"$RUN_DIR/.active-resolvers."}
+  case "$_count_suffix" in ""|*[!A-Za-z0-9]*) return 1 ;; esac
+  trap 'rm -f "$_count_tmp"' 0
+  trap 'exit 1' HUP INT TERM
+  [ -f "$_count_tmp" ] && [ ! -L "$_count_tmp" ] || return 1
+  chmod 0600 "$_count_tmp" && chown "$(config_control_uid):0" "$_count_tmp" || return 1
+  [ -f "$_count_tmp" ] && [ ! -L "$_count_tmp" ] \
+    && [ "$(stat -c '%u:%g:%a' "$_count_tmp")" = "$(config_control_uid):0:600" ] || return 1
+  printf 'v1 %s %s\n' "$_count_generation" "$_count_value" > "$_count_tmp" || return 1
+  active_resolver_paths_trusted || return 1
+  shutdown_requested && return 1
+  [ ! -e "$USER_STOPPED_FILE" ] && [ ! -e "$STARTUP_STATE_FILE" ] || return 1
+  [ "$(active_resolver_generation "$_count_pid")" = "$_count_generation" ] || return 1
+  mv -f "$_count_tmp" "$ACTIVE_RESOLVERS_STATE" || return 1
+  case "$_count_value" in pending*) ;; *) printf '%s\n' "$_count_value" ;; esac
+)
+
+auto_selected_live_resolver_count() (
+  active_resolver_paths_trusted || return 1
+  shutdown_requested && return 1
+  [ ! -e "$USER_STOPPED_FILE" ] && [ ! -e "$STARTUP_STATE_FILE" ] || return 1
+  [ -f "$ACTIVE_RESOLVERS_STATE" ] || return 1
+  _count_bytes=$(stat -c %s "$ACTIVE_RESOLVERS_STATE") || return 1
+  case "$_count_bytes" in ""|*[!0-9]*) return 1 ;; esac
+  [ "$_count_bytes" -le 256 ] || return 1
+  _count_record=$(cat "$ACTIVE_RESOLVERS_STATE") || return 1
+  # Canonical, newline-terminated single record; never source runtime state.
+  [ "$_count_bytes" -eq "$((${#_count_record} + 1))" ] || return 1
+  printf '%s\n' "$_count_record" | grep -Eq '^v1 [A-Za-z0-9-]+ [0-9]+ [0-9]+ ((0|[1-9][0-9]{0,8})|pending [0-9]+:[0-9]+:[0-9]+)$' || return 1
+  set -f
+  set -- $_count_record
+  case "$#" in
+    5) [ "$_count_record" = "$1 $2 $3 $4 $5" ] || return 1 ;;
+    6) [ "$_count_record" = "$1 $2 $3 $4 $5 $6" ] || return 1 ;;
+    *) return 1 ;;
+  esac
+  [ "$(active_resolver_generation "$3")" = "$2 $3 $4" ] || return 1
+  if [ "$5" = pending ]; then
+    # Never let a status request for generation A overwrite generation B.
+    acquire_action_control_lock >/dev/null 2>&1 || return 1
+    active_resolver_paths_trusted || return 1
+    [ "$(cat "$ACTIVE_RESOLVERS_STATE")" = "$_count_record" ] || return 1
+    publish_active_resolver_count "$2 $3 $4" "$6" 1
+  else
+    printf '%s\n' "$5"
+  fi
+)
+
 show_logs() {
   lines="${2:-160}"
   case "$lines" in ""|*[!0-9]*) lines=160 ;; esac
@@ -2478,6 +2671,53 @@ ping_all_resolvers() {
   printf ']\n'
 }
 
+# Read the root server_names string array for protocol-status only. Whitespace,
+# comments and line breaks do not determine whether selection is automatic.
+# Resolver identifiers follow set-resolvers syntax; unsupported/malformed
+# values fail closed rather than being mistaken for an empty automatic list.
+protocol_selected_resolvers() {
+  awk '
+    BEGIN { sq=sprintf("%c",39); dq=sprintf("%c",34); state="start" }
+    !found {
+      if ($0 ~ /^[ \t]*\[/) exit
+      line=$0
+      key="^[ \t]*(server_names|" dq "server_names" dq "|" sq "server_names" sq ")[ \t]*="
+      if (line !~ key) next
+      sub(key, "", line)
+      found=1
+    }
+    found {
+      if (line_set) line=$0
+      line_set=1
+      for (i=1; i<=length(line); i++) {
+        c=substr(line,i,1)
+        if (state=="string") {
+          if (c==quote) {
+            if (name=="") { bad=1; exit }
+            names=names name "\n"; state="comma"
+          } else if (c ~ /[A-Za-z0-9._-]/) name=name c
+          else { bad=1; exit }
+          continue
+        }
+        if (c=="#") break
+        if (c ~ /[ \t\r]/) continue
+        if (state=="start" && c=="[") state="value"
+        else if (state=="value" && (c==sq || c==dq)) {
+          quote=c; name=""; state="string"
+        } else if ((state=="value" || state=="comma") && c=="]") state="done"
+        else if (state=="comma" && c==",") state="value"
+        else { bad=1; exit }
+      }
+      if (state=="string") { bad=1; exit }
+      if (state=="done") exit
+    }
+    END {
+      if (bad || (found && state!="done")) exit 1
+      printf "%s", names
+    }
+  ' "$CONFIG_FILE"
+}
+
 protocol_status() {
   # Return JSON with current protocol configuration and connection quality
   ensure_config || { echo '{"error":"unsafe configuration inputs"}'; return 1; }
@@ -2504,13 +2744,24 @@ protocol_status() {
     fi
     rm -f "$_protocol_probe"
   fi
-  # Count selected resolvers with a successful upstream probe in the log.
+  # Count explicit selections by their successful startup probes. An empty
+  # server_names list means dnscrypt-proxy auto-selects the eligible pool, so
+  # there are no names to enumerate; use its latest startup live-server count.
   _active_resolvers=0
-  _selected_resolvers=$(list_resolvers)
-  for _selected in $_selected_resolvers; do
-    resolver_latency_from_log "$_selected" >/dev/null 2>&1 \
-      && _active_resolvers=$((_active_resolvers + 1))
-  done
+  if ! _selected_resolvers=$(protocol_selected_resolvers); then
+    _active_resolvers=0
+  elif [ -n "$_selected_resolvers" ]; then
+    for _selected in $_selected_resolvers; do
+      resolver_latency_from_log "$_selected" >/dev/null 2>&1 \
+        && _active_resolvers=$((_active_resolvers + 1))
+    done
+  else
+    _auto_live_resolvers=$(auto_selected_live_resolver_count 2>/dev/null || true)
+    case "$_auto_live_resolvers" in
+      ""|*[!0-9]*) ;;
+      *) _active_resolvers=$_auto_live_resolvers ;;
+    esac
+  fi
   printf '{"dnscrypt":%s,"doh":%s,"odoh":%s,"anonymized":%s,"running":%s,"quality":"%s","active_resolvers":%d}\n' \
     "$([ $_dnscrypt -gt 0 ] && echo true || echo false)" \
     "$([ $_doh -gt 0 ] && echo true || echo false)" \
