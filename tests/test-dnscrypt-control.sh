@@ -1688,6 +1688,31 @@ test_protocol_status_rejects_unsafe_service_log() {
   assert_protocol_resolver_count 0
 }
 
+
+test_runtime_private_umask_repairs_existing_service_log() {
+  setup_protocol_resolver_fixture 'server_names=[]'
+  chmod 0666 "$MODULE_DIR/logs/service.log"
+
+  PROTOCOL_COUNT_DAEMON=1
+  sed 's/\r$//' "$MOCK_SOURCE_DIR/dnscrypt-control-daemon" > "$MODULE_DIR/bin/dnscrypt-proxy"
+  chmod 0755 "$MODULE_DIR/bin/dnscrypt-proxy"
+  printf '%s\n' upstream_only > "$MODULE_DIR/state/dns-mode.state"
+  MOCK_DAEMON_LIVE_COUNT=175
+  export MOCK_DAEMON_LIVE_COUNT
+
+  previous_umask=$(umask)
+  umask 000
+  output=$(run_control start 2>&1)
+  status=$?
+  umask "$previous_umask"
+
+  assert_eq 0 "$status" "permissive inherited umask broke startup: $output" || return 1
+  assert_eq 600 "$("$HOST_STAT" -c %a "$MODULE_DIR/logs/service.log")"     'startup did not repair an existing root-owned service.log to 0600' || return 1
+  assert_eq 600 "$("$HOST_STAT" -c %a "$MODULE_DIR/run/dnscrypt-proxy.pid")"     'startup inherited a permissive umask for the PID record' || return 1
+  assert_eq 600 "$("$HOST_STAT" -c %a "$MODULE_DIR/run/active-resolvers.state")"     'resolver count state is not private under a permissive inherited umask' || return 1
+  assert_protocol_resolver_count 175
+}
+
 test_firewall_rule_cleanup_is_idempotent() {
   setup_ready_daemon_fixture
   printf '%s\n' strict > "$MODULE_DIR/state/dns-mode.state"
@@ -3843,6 +3868,7 @@ run_case 'protocol status rejects counts after daemon crash and failed replaceme
 run_case 'protocol status count writer refuses a symlink destination' test_protocol_status_count_writer_rejects_symlink
 run_case 'protocol status count writer refuses an unsafe temporary file' test_protocol_status_count_writer_rejects_unsafe_temp
 run_case 'protocol status rejects symlinked service logs' test_protocol_status_rejects_unsafe_service_log
+run_case 'runtime repairs private control files under permissive inherited umask' test_runtime_private_umask_repairs_existing_service_log
 run_case 'IPv4 and IPv6 firewall cleanup is idempotent' test_firewall_rule_cleanup_is_idempotent
 run_case 'unproven same-name firewall chains are preserved' test_foreign_same_name_firewall_chains_are_never_claimed
 run_case 'lifecycle lock waits are bounded and shutdown blocks firewall commits' test_lifecycle_lock_wait_and_shutdown_interlock
