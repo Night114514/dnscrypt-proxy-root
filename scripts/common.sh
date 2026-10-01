@@ -3,6 +3,11 @@
 # shellcheck disable=SC2034
 set -u
 
+# Root-manager service environments do not guarantee a restrictive inherited
+# umask. Keep every runtime-created control, lock, state and log file private
+# regardless of whether Magisk, KernelSU/ReSukiSU, or APatch launched us.
+umask 077
+
 # File mutations must retain lifecycle locks even if their shell owner dies.
 # mksh makes shell-opened high FDs private, so export them on the external
 # command itself (a redirection on a shell function does not suffice). Keep
@@ -119,6 +124,35 @@ CONTROL_LOG="$LOG_DIR/control.log"
 mkdir -p "$STATE_DIR" "$RUN_DIR" "$LOG_DIR" "$TMP_BASE" 2>/dev/null
 chmod 0700 "$STATE_DIR" 2>/dev/null || true
 chown 0:0 "$STATE_DIR" 2>/dev/null || true
+
+# Installer-time permissions cover files that already exist while a module is
+# staged, but service.log/PID/lock/status files are commonly created later at
+# boot. Repair only known regular root-owned files; never follow a symlink or
+# adopt an unexpected owner merely to make a trust check pass.
+repair_private_root_file() {
+  _private_path=$1
+  if [ ! -e "$_private_path" ] && [ ! -L "$_private_path" ]; then
+    return 0
+  fi
+  [ -f "$_private_path" ] && [ ! -L "$_private_path" ] || return 1
+  [ "$(stat -c '%u:%g' "$_private_path" 2>/dev/null)" = "0:0" ] || return 1
+  chmod 0600 "$_private_path"
+}
+
+for _private_path in \
+  "$SERVICE_LOG" "$UPDATE_LOG" "$CONTROL_LOG" \
+  "$PID_FILE" "$WATCHDOG_PID_FILE" \
+  "$SERVICE_LOCK_FILE" "$RUNTIME_LOCK_FILE" \
+  "$INSTALLED_VERSION_FILE" "$USER_STOPPED_FILE" \
+  "$UPDATE_STATUS_FILE" "$STARTUP_STATE_FILE" \
+  "$START_FAILURE_STATE_FILE" "$UPSTREAM_STATUS_FILE" \
+  "$PRIVATE_DNS_STATE_FILE" "$DNS_MODE_STATE_FILE" \
+  "$FIREWALL_OWNERSHIP_FILE" "$LEGACY_FIREWALL_ADOPTION_FILE" \
+  "$LEGACY_IPV6_REBOOT_FILE" "$RUNTIME_OPERATION_FILE"
+do
+  repair_private_root_file "$_private_path" >/dev/null 2>&1 || true
+done
+unset _private_path
 
 now_iso() {
   date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date
