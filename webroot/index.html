@@ -17,7 +17,7 @@
         <button class="icon-button mobile-only" id="menuButton" type="button" aria-label="Open navigation" aria-expanded="false">☰</button>
         <a class="brand" href="#overview" aria-label="DNSCrypt Proxy Root overview">
           <span class="brand-mark" aria-hidden="true">D</span>
-          <span><strong>DNSCrypt Proxy Root</strong><small>v0.9.2 control plane</small></span>
+          <span><strong>DNSCrypt Proxy Root</strong><small>v1.0.0 control plane</small></span>
         </a>
         <div class="topbar-actions">
           <span class="bridge-state" id="bridgeState" role="status"><span class="dot"></span><span data-i18n="bridge.checking">Checking bridge</span></span>
@@ -45,7 +45,7 @@
           <button class="nav-item" type="button" data-view="about"><span aria-hidden="true">i</span><span data-i18n="nav.about">About</span></button>
         </nav>
         <div class="sidebar-foot">
-          <span id="sidebarVersion">v0.9.2</span>
+          <span id="sidebarVersion">v1.0.0</span>
           <span data-i18n="common.localOnly">Local device only</span>
         </div>
       </aside>
@@ -192,9 +192,9 @@
         </section>
 
         <section class="view" data-view-panel="about" aria-labelledby="aboutTitle">
-          <div class="page-heading"><div><p class="eyebrow">v0.9.2</p><h1 id="aboutTitle" data-i18n="about.title">About this control plane</h1><p data-i18n="about.subtitle">A dependency-free, reproducible WebUI for the dnscrypt-proxy-root Android module.</p></div></div>
+          <div class="page-heading"><div><p class="eyebrow">v1.0.0</p><h1 id="aboutTitle" data-i18n="about.title">About this control plane</h1><p data-i18n="about.subtitle">A dependency-free, reproducible WebUI for the dnscrypt-proxy-root Android module.</p></div></div>
           <div class="two-column"><article class="panel"><h2 data-i18n="about.security">Security boundary</h2><p data-i18n="about.securityBody">The WebUI requests allowlisted actions. The root shell remains responsible for validation, locking, ownership checks, and rollback.</p></article><article class="panel"><h2 data-i18n="about.license">Licensing</h2><p data-i18n="about.licenseBody">Project code is MIT-licensed. Bundled third-party notices and license texts ship in the module ZIP.</p></article></div>
-          <article class="panel"><h2 data-i18n="about.deviceEvidence">Device evidence</h2><p data-i18n="about.deviceEvidenceBody">Desktop shell tests do not substitute for the published physical-device acceptance matrix. Consult REAL_DEVICE_ACCEPTANCE.md before production rollout.</p></article>
+          <article class="panel"><h2 data-i18n="about.deviceEvidence">Device evidence</h2><p data-i18n="about.deviceEvidenceBody">Desktop shell tests do not substitute for physical-device acceptance. A dated Xiaomi 14T Pro / KernelSU report is published, with deliberately limited scope.</p></article>
         </section>
       </main>
     </div>

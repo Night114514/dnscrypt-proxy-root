@@ -6,10 +6,11 @@ local DNS upstream.
 [Releases](https://github.com/Night114514/dnscrypt-proxy-root/releases) ·
 [繁體中文](README.zh-TW.md) · [简体中文](README.zh-CN.md) · [Changelog](CHANGELOG.md)
 
-> **v0.9.2 status:** the module tracks dnscrypt-proxy 2.1.18. Its automated dash, BusyBox ash,
-> JavaScript, lint, rollback, and archive checks do not replace Android hardware testing. The
-> [real-device acceptance matrix](REAL_DEVICE_ACCEPTANCE.md) remains explicitly **NOT RUN** for
-> v0.9.2; do not assume every device, root manager, VPN, or DNS frontend is already certified.
+> **v1.0.0 status:** the module tracks dnscrypt-proxy 2.1.18. Published physical-device evidence
+> covers Xiaomi 14T Pro / Android 16 / KernelSU for upgrade, `upstream_only`, the Privacy preset,
+> anonymized routing, and two-reboot persistence on the merged pre-release baseline; see the
+> [dated acceptance report](REAL_DEVICE_ACCEPTANCE_2026-09-29_KernelSU_Xiaomi14TPro.md). Automated
+> checks still do not certify `strict`, Magisk/APatch, VPN/lockdown, every device, or every DNS frontend.
 
 ## Choose the integration mode
 
@@ -84,7 +85,7 @@ root-shell control script.
 
 ## Install or upgrade
 
-1. Download `dnscrypt-proxy-root-v0.9.2.zip` from [Releases](https://github.com/Night114514/dnscrypt-proxy-root/releases).
+1. Download `dnscrypt-proxy-root-v1.0.0.zip` from [Releases](https://github.com/Night114514/dnscrypt-proxy-root/releases).
 2. Install it in your root manager.
 3. Reboot.
 4. Check the full service state, then select the integration mode that matches your DNS topology.
@@ -97,7 +98,7 @@ warns without abandoning module installation; first boot or a later manual updat
 > first. Those layouts do not meet the hardened migration-provenance boundary and are replaced with
 > audited defaults. Reboot, then reapply the desired inputs. Direct upgrades from v0.6.0 through
 > v0.8.0 must reboot so indistinguishable legacy per-boot IPv6 rules disappear safely. A trusted
-> v0.9.1 canonical generation is preserved by the v0.9.2 installer.
+> v0.9.1 canonical generation is preserved by the v1.0.0 installer.
 
 ## First verification and common controls
 
@@ -143,7 +144,7 @@ Open the module WebUI from KernelSU/APatch to see backend-reported status, edit 
 lists, choose resolvers, manage subscriptions, inspect statistics/logs, run bounded diagnostics,
 update the core, and export/import a generation. The TOML control is a plain text editor.
 
-The v0.9.2 WebUI is built from the dependency-free source in `webui/src/`; the committed five-file
+The v1.0.0 WebUI is built from the dependency-free source in `webui/src/`; the committed five-file
 output in `webroot/` is deterministic and contains no development React bundle or remote analytics.
 The bridge allowlists control actions and leaves path, ownership, lock, validation, and rollback
 enforcement to the root backend.
@@ -252,7 +253,7 @@ Useful repository checks:
 ```sh
 node webui/build.mjs --check
 node tests/test-webui-bridge.js
-node tests/test-v092-release.js
+node tests/test-v100-release.js
 env DNSCRYPT_UPDATE_INTERVAL_SECONDS=0 TEST_SHELL_KIND=dash dash tests/test-update-dnscrypt.sh
 env TEST_SHELL_KIND=dash dash tests/test-dnscrypt-control.sh
 env DNSCRYPT_UPDATE_INTERVAL_SECONDS=0 TEST_SHELL_KIND=busybox-ash busybox ash tests/test-update-dnscrypt.sh
@@ -263,7 +264,7 @@ env TEST_SHELL_KIND=busybox-ash busybox ash tests/test-dnscrypt-control.sh
 the build script. CI also checks shell syntax, ShellCheck, JavaScript syntax, both shell matrices,
 release metadata, executable/data modes, archive exclusions, and legal files. These checks are not
 evidence of actual Android installation, SELinux, firewall, VPN, or packet-path behavior; record
-that evidence in [REAL_DEVICE_ACCEPTANCE.md](REAL_DEVICE_ACCEPTANCE.md).
+new evidence in a dated acceptance report; [REAL_DEVICE_ACCEPTANCE.md](REAL_DEVICE_ACCEPTANCE.md) remains the historical v0.9.2 matrix.
 
 Automatic release packaging checks out the exact event SHA that passed the reusable test job and
 aborts if `master` has advanced. Release tags and ZIPs are therefore not built from a later untested
