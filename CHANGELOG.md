@@ -43,7 +43,7 @@
 
 ### Validation and release scope
 
-- Expand the portable shell matrix to dash, BusyBox ash, and mksh with 49 updater tests and 81
+- Expand the portable shell matrix to dash, BusyBox ash, and mksh with 49 updater tests and 87
   control tests per shell at the v1.0.0 preparation baseline, plus ShellCheck, JavaScript syntax,
   WebUI bridge, deterministic WebUI output, release-contract, real flock, and real resolver preset
   checks.
