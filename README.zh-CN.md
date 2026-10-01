@@ -5,10 +5,10 @@
 [下载 Release](https://github.com/Night114514/dnscrypt-proxy-root/releases) ·
 [English](README.md) · [繁體中文](README.zh-TW.md) · [更新记录](CHANGELOG.md)
 
-> **v0.9.2 状态：**模块跟踪 dnscrypt-proxy 2.1.18。dash、BusyBox ash、JavaScript、lint、
-> 回滚及打包自动测试不能取代 Android 真机测试；v0.9.2 的
-> [真机验收矩阵](REAL_DEVICE_ACCEPTANCE.md) 仍明确标为 **NOT RUN**。请勿假定所有设备、
-> Root 管理器、VPN 或 DNS 前端均已验证兼容。
+> **v1.0.0 状态：**模块跟踪 dnscrypt-proxy 2.1.18。已发布的真机证据覆盖 Xiaomi 14T Pro /
+> Android 16 / KernelSU 的升级、`upstream_only`、Privacy preset、匿名 relay 路由与两次重启持久性；
+> 详见 [2026-09-29 真机验收报告](REAL_DEVICE_ACCEPTANCE_2026-09-29_KernelSU_Xiaomi14TPro.md)。
+> 自动测试仍不代表 `strict`、Magisk/APatch、VPN/lockdown、所有设备或所有 DNS 前端均已验证。
 
 ## 选择集成模式
 
@@ -46,7 +46,7 @@ WebUI 供 KernelSU／APatch 使用；Magisk 用户可通过 action 按钮与 roo
 
 ## 安装与升级
 
-1. 从 [Releases](https://github.com/Night114514/dnscrypt-proxy-root/releases) 下载 `dnscrypt-proxy-root-v0.9.2.zip`。
+1. 从 [Releases](https://github.com/Night114514/dnscrypt-proxy-root/releases) 下载 `dnscrypt-proxy-root-v1.0.0.zip`。
 2. 在 Root 管理器安装模块。
 3. 重启设备。
 4. 检查完整服务状态，再选择符合 DNS 架构的集成模式。
@@ -57,7 +57,7 @@ WebUI 供 KernelSU／APatch 使用；Magisk 用户可通过 action 按钮与 roo
 > **从 v0.9.0 或更旧版本升级：**请先导出或记录配置、列表与订阅。旧版布局不符合强化后的迁移
 > 来源边界，安装程序会改用经过审计的默认值；重启后再应用所需输入。从 v0.6.0–v0.8.0 直接升级
 > 必须重启，以安全清除无法辨认来源的旧式 per-boot IPv6 规则。可信的 v0.9.1 canonical generation
-> 会由 v0.9.2 安装程序保留。
+> 会由 v1.0.0 安装程序保留。
 
 ## 首次验证与常用操作
 
@@ -101,7 +101,7 @@ sh "$DPR_CTL" set-dns-mode strict
 在 KernelSU／APatch 模块页打开 WebUI，可查看后端真实状态、编辑 TOML／受管理列表、选择解析器、
 管理订阅、查看统计与日志、执行有界诊断、更新核心，以及导出／导入 generation。TOML 控件是纯文本编辑器。
 
-v0.9.2 WebUI 由无依赖的 `webui/src/` 源码构建；提交到 `webroot/` 的五个文件可确定性重建，
+v1.0.0 WebUI 由无依赖的 `webui/src/` 源码构建；提交到 `webroot/` 的五个文件可确定性重建，
 不再包含 development React bundle 或远程分析。桥接只允许列明的控制操作；路径、所有权、锁、
 验证与回滚仍由 root 后端强制执行。
 
@@ -202,7 +202,7 @@ busybox ash tests/test-dnscrypt-control.sh
 `node webui/build.mjs` 会按照构建脚本声明，有意以确定性文件替换 `webroot/`。CI 也检查 shell／
 JavaScript 语法、ShellCheck、两套 shell 矩阵、release metadata、ZIP 权限／排除规则与许可证文件。
 这些都不是 Android 安装、SELinux、firewall、VPN 或实际数据包路径的证据；真机结果必须记录在
-[REAL_DEVICE_ACCEPTANCE.md](REAL_DEVICE_ACCEPTANCE.md)。
+新的证据应记录在带日期的验收报告中；[REAL_DEVICE_ACCEPTANCE.md](REAL_DEVICE_ACCEPTANCE.md) 保留为历史 v0.9.2 矩阵。
 
 自动发布只 checkout 通过 reusable tests 的准确事件 SHA；如果 `master` 已前进就中止，避免用更新的
 未测试 branch tip 构建 tag／ZIP。

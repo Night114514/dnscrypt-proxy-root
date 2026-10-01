@@ -24,7 +24,7 @@ upstream source.
 
 - Installed component: dnscrypt-proxy executable
 - Upstream project: dnscrypt-proxy, <https://github.com/DNSCrypt/dnscrypt-proxy>
-- Tracked release for v0.9.2: `2.1.18`
+- Tracked release for v1.0.0: `2.1.18`
 - Distribution boundary: the executable is not included in the module ZIP; the
   installer/updater downloads the matching official release asset on device
 - License: ISC
@@ -36,7 +36,7 @@ with that release channel; it is not an independent project signature.
 
 ## WebUI
 
-The v0.9.2 WebUI under `webui/src/` and its deterministic output under
+The v1.0.0 WebUI under `webui/src/` and its deterministic output under
 `webroot/` use browser platform APIs only. The package manifest has no runtime
 or development dependencies, and the release does not contain the former
 React, Recharts, Lucide, or object-assign bundle.

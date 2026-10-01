@@ -11,9 +11,9 @@ const exists = (relativePath) => fs.existsSync(path.join(root, relativePath));
 
 const control = read('scripts/dnscrypt-control.sh');
 assert.match(control, /^get_list\(\) \{/m,
-  'v0.9.2 must read canonical lists through a validated backend command');
+  'v1.0.0 must read canonical lists through a validated backend command');
 assert.match(control, /^config_apply_state\(\) \{/m,
-  'v0.9.2 status must expose whether canonical inputs are pending application');
+  'v1.0.0 status must expose whether canonical inputs are pending application');
 assert.match(control, /get-list\) get_list /,
   'the get-list backend function is not reachable from the command dispatcher');
 assert.match(control, /"comparison_scope":"%s"/,
@@ -40,6 +40,10 @@ assert.doesNotMatch(bridgeSource, /_test\s*:/,
   'production WebUI bridge exposes an internal raw-command test hook');
 
 const webuiPackage = JSON.parse(read('webui/package.json'));
+assert.equal(webuiPackage.version, '1.0.0', 'WebUI package is not prepared for v1.0.0');
+const webuiLock = JSON.parse(read('webui/package-lock.json'));
+assert.equal(webuiLock.version, '1.0.0', 'WebUI lockfile is not prepared for v1.0.0');
+assert.equal(webuiLock.packages?.['']?.version, '1.0.0', 'WebUI root lock package is not prepared for v1.0.0');
 assert.deepEqual(webuiPackage.dependencies || {}, {},
   'the replacement WebUI must not add untracked runtime dependencies');
 assert.deepEqual(webuiPackage.devDependencies || {}, {},
@@ -85,8 +89,8 @@ assert.match(autoUpdate, /ref:\s+\$\{\{ github\.sha \}\}/,
 assert.doesNotMatch(autoUpdate, /ref:\s+master/,
   'auto-update still checks out a moving master branch after verification');
 
-assert.match(read('.github/workflows/test.yml'), /node tests\/test-v092-release\.js/,
-  'the v0.9.2 release contract is not enforced by the reusable CI workflow');
+assert.match(read('.github/workflows/test.yml'), /node tests\/test-v100-release\.js/,
+  'the v1.0.0 release contract is not enforced by the reusable CI workflow');
 
 for (const workflowPath of [
   '.github/workflows/auto-update.yml',
@@ -101,11 +105,24 @@ for (const workflowPath of [
     `${workflowPath} does not prove that shipped WebUI assets are reproducible`);
 }
 
-assert.match(read('module.prop'), /^version=v0\.9\.2$/m,
-  'module.prop is not prepared for v0.9.2');
+assert.match(read('module.prop'), /^version=v1\.0\.0$/m,
+  'module.prop is not prepared for v1.0.0');
+assert.match(read('module.prop'), /^versionCode=2026100101$/m,
+  'module.prop versionCode is not prepared for v1.0.0');
 const update = JSON.parse(read('update.json'));
-assert.equal(update.version, 'v0.9.2', 'update.json is not prepared for v0.9.2');
-assert.match(read('CHANGELOG.md'), /^## v0\.9\.2 \(2026-09-09\)$/m,
-  'CHANGELOG.md has no dated v0.9.2 entry');
+assert.equal(update.version, 'v1.0.0', 'update.json is not prepared for v1.0.0');
+assert.equal(update.versionCode, 2026100101, 'update.json versionCode is not prepared for v1.0.0');
+assert.equal(update.zipUrl,
+  'https://github.com/Night114514/dnscrypt-proxy-root/releases/download/v1.0.0/dnscrypt-proxy-root-v1.0.0.zip',
+  'update.json ZIP URL is not prepared for v1.0.0');
+assert.equal(update.changelog,
+  'https://raw.githubusercontent.com/Night114514/dnscrypt-proxy-root/v1.0.0/CHANGELOG.md',
+  'update.json changelog URL is not prepared for v1.0.0');
+assert.match(read('CHANGELOG.md'), /^## v1\.0\.0 \(2026-10-01\)$/m,
+  'CHANGELOG.md has no dated v1.0.0 entry');
+assert.equal(read('.github/upstream-version').trim(), '2.1.18',
+  'v1.0.0 must continue tracking the latest formal dnscrypt-proxy release');
+assert.match(read('README.md'), /REAL_DEVICE_ACCEPTANCE_2026-09-29_KernelSU_Xiaomi14TPro\.md/,
+  'README does not link the published physical-device acceptance evidence');
 
-console.log('v0.9.2 release contract passed.');
+console.log('v1.0.0 release contract passed.');

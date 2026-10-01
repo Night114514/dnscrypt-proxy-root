@@ -66,7 +66,7 @@
       'about.title': '關於此控制平面', 'about.subtitle': 'dnscrypt-proxy-root Android 模組的零依賴、可重現 WebUI。',
       'about.security': '安全邊界', 'about.securityBody': 'WebUI 只要求 allowlisted 操作；Root shell 仍負責驗證、鎖定、擁有權檢查與回滾。',
       'about.license': '授權', 'about.licenseBody': '專案程式碼採 MIT；模組 ZIP 會一併提供第三方聲明與授權全文。',
-      'about.deviceEvidence': '裝置證據', 'about.deviceEvidenceBody': '桌面 shell 測試不能取代公開的實體裝置驗收矩陣；正式部署前請查閱 REAL_DEVICE_ACCEPTANCE.md。',
+      'about.deviceEvidence': '裝置證據', 'about.deviceEvidenceBody': '桌面 shell 測試不能取代實機驗收；repository 已發布具日期嘅 Xiaomi 14T Pro / KernelSU 報告，適用範圍刻意受限。',
       'dynamic.running': '運行中', 'dynamic.stopped': '已停止', 'dynamic.yes': '是', 'dynamic.no': '否',
       'dynamic.applied': '已套用', 'dynamic.pending': '待套用', 'dynamic.unavailable': '不可用',
       'dynamic.policyAffected': '嚴格模式已重新導向這個目的地查詢；這不是繞過策略的「直接 DNS」測試。',
@@ -118,7 +118,7 @@
       'about.title': '关于此控制平面', 'about.subtitle': 'dnscrypt-proxy-root Android 模块的零依赖、可重现 WebUI。',
       'about.security': '安全边界', 'about.securityBody': 'WebUI 只请求允许列表内的操作；Root shell 仍负责验证、锁、所有权检查和回滚。',
       'about.license': '许可', 'about.licenseBody': '项目代码采用 MIT；模块 ZIP 同时提供第三方声明及许可证全文。',
-      'about.deviceEvidence': '设备证据', 'about.deviceEvidenceBody': '桌面 shell 测试不能取代公开的实体设备验收矩阵；正式部署前请查看 REAL_DEVICE_ACCEPTANCE.md。',
+      'about.deviceEvidence': '设备证据', 'about.deviceEvidenceBody': '桌面 shell 测试不能取代真机验收；repository 已发布带日期的 Xiaomi 14T Pro / KernelSU 报告，适用范围刻意受限。',
       'dynamic.running': '运行中', 'dynamic.stopped': '已停止', 'dynamic.yes': '是', 'dynamic.no': '否',
       'dynamic.applied': '已应用', 'dynamic.pending': '待应用', 'dynamic.unavailable': '不可用',
       'dynamic.policyAffected': '严格模式已重定向这个目的地查询；这不是绕过策略的“直接 DNS”测试。',
@@ -224,7 +224,7 @@
     byId('detailFailure').textContent = dynamicValue(status.start_failure || 'none');
     byId('detailConfig').textContent = status.config || '—';
     byId('installedVersion').textContent = status.version || '—';
-    byId('sidebarVersion').textContent = `v0.9.2 · ${status.version || 'daemon —'}`;
+    byId('sidebarVersion').textContent = `v1.0.0 · ${status.version || 'daemon —'}`;
     byId('updateSummary').textContent = [status.update_state, status.update_message, status.update_time].filter(Boolean).join(' · ') || '—';
     documentObject.querySelectorAll('[data-dns-mode]').forEach((button) => button.classList.toggle('active', button.dataset.dnsMode === status.dns_mode));
   }
@@ -477,7 +477,7 @@
       const blob = new windowObject.Blob([manifest], {type: 'application/json'});
       const link = documentObject.createElement('a');
       link.href = windowObject.URL.createObjectURL(blob);
-      link.download = `dnscrypt-proxy-root-v0.9.2-${new Date().toISOString().slice(0, 10)}.json`;
+      link.download = `dnscrypt-proxy-root-v1.0.0-${new Date().toISOString().slice(0, 10)}.json`;
       link.click();
       windowObject.setTimeout(() => windowObject.URL.revokeObjectURL(link.href), 1000);
       byId('backupResult').textContent = `Exported generation schema v${parsed.version}.`;

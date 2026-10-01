@@ -2,16 +2,55 @@
 
 ## Unreleased
 
-### Android / mksh file-descriptor locks
+## v1.0.0 (2026-10-01)
 
-- Fix an existing Android shell compatibility defect in runtime-tree, control,
-  watchdog-start, and updater locks. Bridge shell-owned FD 6/7/8/9 onto stdin
-  for external flock, retaining the same open file description and stable inode.
-- Explicitly export the inherited control descriptor when delegating between
-  control and updater processes under mksh.
-- Add real mksh/flock contention and release regression coverage and a
-  dash, BusyBox ash, and mksh CI test matrix. Android Emulator acceptance of
-  these changes remains pending; the existing emulator staging is unchanged.
+> **Device-evidence boundary:** v1.0.0 is the first stable line with published physical-device
+> evidence. The dated Xiaomi 14T Pro / Android 16 / KernelSU report covers the tested
+> `upstream_only` + Privacy/anonymized path and two reboot cycles on the merged pre-release
+> baseline. It does not certify every device, `strict`, Magisk/APatch, VPN/lockdown, or other
+> untested combinations.
+
+### Android runtime and transaction hardening
+
+- Enforce the canonical `127.0.0.1:5354` listener contract across config writes, add decoded TOML
+  and subscription resource limits, make subscription application/rollback transactional, and keep
+  default recreation anchored to the shipped audited template.
+- Fix Android/mksh file-descriptor locking by preserving the same open file description across
+  external `flock` calls, preserving stdin and lock lifetime under dash, BusyBox ash, and mksh.
+- Resolve a trusted absolute timeout executable under KernelSU BusyBox ASH Standalone mode and use
+  uptime-based diagnostic timing so wall-clock changes cannot produce false offline state or
+  negative DNS-test latency.
+- Update GitHub Actions checkout steps to the immutable v7.0.1 commit while retaining the existing
+  pinned-action and exact-SHA release workflow model.
+
+### Resolver presets and observability
+
+- Make Privacy use dynamic DNSCrypt property filtering so `require_dnssec` and `require_nolog`
+  participate in resolver selection; keep `require_nofilter=false`, enable
+  `anonymized_dns.skip_incompatible=true`, and retain curated explicit Fastest/Family presets.
+- Add real dnscrypt-proxy 2.1.18 preset validation against signed resolver metadata, including exact
+  curated resolver-set assertions and live anonymized-relay evidence on the tested device path.
+- Fix `protocol-status` automatic resolver counts without relying on a fixed log tail. Counts are
+  bound to the current boot/PID/kernel-start generation, published through a root-owned 0600 atomic
+  state record, and repaired only from a trusted launch origin.
+- Preserve correct counts across delayed startup summaries, arbitrary later log growth,
+  locally-ready policy failures, already-running repair, publication failure/retry, daemon crashes,
+  restarts, stops, and shutdown races. Explicit resolver mode continues to count only configured
+  names with successful startup RTT evidence.
+- Parse root `server_names` array semantics independently of line formatting so compact, spaced,
+  indented, commented, and multiline TOML arrays classify automatic versus explicit selection
+  correctly and fail closed on malformed values.
+
+### Validation and release scope
+
+- Expand the portable shell matrix to dash, BusyBox ash, and mksh with 49 updater tests and 87
+  control tests per shell at the v1.0.0 preparation baseline, plus ShellCheck, JavaScript syntax,
+  WebUI bridge, deterministic WebUI output, release-contract, real flock, and real resolver preset
+  checks.
+- Add the dated physical-device report
+  `REAL_DEVICE_ACCEPTANCE_2026-09-29_KernelSU_Xiaomi14TPro.md` without rewriting the historical
+  v0.9.2 `REAL_DEVICE_ACCEPTANCE.md` matrix. The report records its exact tested commit, device,
+  root manager, integration mode, privacy semantics, relay evidence, and two-reboot persistence.
 
 ## v0.9.2 (2026-09-09)
 

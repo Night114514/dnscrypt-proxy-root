@@ -1688,6 +1688,118 @@ test_protocol_status_rejects_unsafe_service_log() {
   assert_protocol_resolver_count 0
 }
 
+
+test_runtime_private_umask_fresh_files() {
+  setup_protocol_resolver_fixture 'server_names=[]'
+  rm -f "$MODULE_DIR/logs/service.log" "$MODULE_DIR/logs/control.log"
+  previous_umask=$(umask)
+  umask 000
+  start_protocol_count_daemon 175
+  status=$?
+  umask "$previous_umask"
+  [ "$status" -eq 0 ] || return 1
+  for private_file in logs/service.log run/dnscrypt-proxy.pid run/active-resolvers.state; do
+    assert_eq 600 "$("$HOST_STAT" -c %a "$MODULE_DIR/$private_file")" "$private_file inherited permissive umask" || return 1
+  done
+  assert_file_contains "$MODULE_DIR/logs/service.log" 'dnscrypt-resolver-origin=v1' 'startup origin is missing' || return 1
+  output=$(run_control status 2>&1)
+  assert_contains "$output" '"start_failure":"none"' 'fresh private startup recorded a failure' || return 1
+  assert_protocol_resolver_count 175
+}
+
+test_runtime_private_normalization_trusted_files() {
+  for private_file in logs/service.log logs/control.log logs/update.log \
+    run/dnscrypt-proxy.pid run/control.lock run/runtime-tree.lock run/update.lock \
+    run/watchdog-start.lock run/last-update-check state/dns-mode.state; do
+    printf '%s\n' fixture > "$MODULE_DIR/$private_file"
+    chmod 0666 "$MODULE_DIR/$private_file"
+  done
+  run_common_probe ':' || return 1
+  for private_file in logs/service.log logs/control.log logs/update.log \
+    run/dnscrypt-proxy.pid run/control.lock run/runtime-tree.lock run/update.lock \
+    run/watchdog-start.lock run/last-update-check state/dns-mode.state; do
+    assert_eq 600 "$("$HOST_STAT" -c %a "$MODULE_DIR/$private_file")" "$private_file was not normalized" || return 1
+    assert_eq fixture "$(cat "$MODULE_DIR/$private_file")" "$private_file contents changed" || return 1
+  done
+}
+
+test_runtime_private_normalization_rejects_untrusted_paths() {
+  private_log="$MODULE_DIR/logs/service.log"
+  printf '%s\n' victim > "$CURRENT_CASE_DIR/victim"
+  chmod 0666 "$CURRENT_CASE_DIR/victim"
+  ln -s "$CURRENT_CASE_DIR/victim" "$private_log"
+  run_common_probe 'if repair_private_root_file "$SERVICE_LOG"; then exit 1; fi' || return 1
+  assert_eq 666 "$("$HOST_STAT" -c %a "$CURRENT_CASE_DIR/victim")" 'normalization followed a symlink' || return 1
+  rm "$private_log"
+  printf '%s\n' original > "$private_log"
+  chmod 0666 "$private_log"
+  MOCK_STAT_UNTRUSTED_PATH="$private_log"
+  export MOCK_STAT_UNTRUSTED_PATH
+  run_common_probe 'if repair_private_root_file "$SERVICE_LOG"; then exit 1; fi' || return 1
+  assert_eq 666 "$("$HOST_STAT" -c %a "$private_log")" 'normalization adopted an untrusted owner' || return 1
+  unset MOCK_STAT_UNTRUSTED_PATH
+  rm "$private_log"
+  mkdir "$private_log"
+  run_common_probe 'if repair_private_root_file "$SERVICE_LOG"; then exit 1; fi' || return 1
+}
+
+test_runtime_private_normalization_rejects_parent() {
+  private_log="$MODULE_DIR/logs/service.log"
+  printf '%s\n' original > "$private_log"
+  for parent_fault in writable owner symlink; do
+    chmod 0666 "$private_log"
+    case "$parent_fault" in
+      writable) chmod 0777 "$MODULE_DIR/logs" ;;
+      owner) MOCK_STAT_UNTRUSTED_PATH="$MODULE_DIR/logs"; export MOCK_STAT_UNTRUSTED_PATH ;;
+      symlink)
+        mv "$MODULE_DIR/logs" "$CURRENT_CASE_DIR/other-logs"
+        ln -s "$CURRENT_CASE_DIR/other-logs" "$MODULE_DIR/logs"
+        ;;
+    esac
+    run_common_probe 'if repair_private_root_file "$SERVICE_LOG"; then exit 1; fi' || fail "$parent_fault parent was accepted" || return 1
+    assert_eq 666 "$("$HOST_STAT" -c %a "$private_log")" "$parent_fault parent was hidden by chmod" || return 1
+    case "$parent_fault" in
+      writable) chmod 0755 "$MODULE_DIR/logs" ;;
+      owner) unset MOCK_STAT_UNTRUSTED_PATH ;;
+      symlink) rm "$MODULE_DIR/logs"; mv "$CURRENT_CASE_DIR/other-logs" "$MODULE_DIR/logs" ;;
+    esac
+  done
+}
+
+test_runtime_private_resolver_trust_still_rejects_unsafe_mode() {
+  setup_protocol_resolver_fixture 'server_names=[]'
+  cat > "$CURRENT_CASE_DIR/probe-body" <<'PROBE'
+chmod 0666 "$SERVICE_LOG" || exit 1
+if active_resolver_log_origin; then exit 1; fi
+PROBE
+  install_control_probe_body
+  run_control protocol-status >/dev/null 2>&1 || fail 'resolver trust accepted an unsafe log mode'
+}
+
+test_runtime_private_umask_repairs_existing_service_log() {
+  setup_protocol_resolver_fixture 'server_names=[]'
+  chmod 0666 "$MODULE_DIR/logs/service.log"
+
+  PROTOCOL_COUNT_DAEMON=1
+  sed 's/\r$//' "$MOCK_SOURCE_DIR/dnscrypt-control-daemon" > "$MODULE_DIR/bin/dnscrypt-proxy"
+  chmod 0755 "$MODULE_DIR/bin/dnscrypt-proxy"
+  printf '%s\n' upstream_only > "$MODULE_DIR/state/dns-mode.state"
+  MOCK_DAEMON_LIVE_COUNT=175
+  export MOCK_DAEMON_LIVE_COUNT
+
+  previous_umask=$(umask)
+  umask 000
+  output=$(run_control start 2>&1)
+  status=$?
+  umask "$previous_umask"
+
+  assert_eq 0 "$status" "permissive inherited umask broke startup: $output" || return 1
+  assert_eq 600 "$("$HOST_STAT" -c %a "$MODULE_DIR/logs/service.log")"     'startup did not repair an existing root-owned service.log to 0600' || return 1
+  assert_eq 600 "$("$HOST_STAT" -c %a "$MODULE_DIR/run/dnscrypt-proxy.pid")"     'startup inherited a permissive umask for the PID record' || return 1
+  assert_eq 600 "$("$HOST_STAT" -c %a "$MODULE_DIR/run/active-resolvers.state")"     'resolver count state is not private under a permissive inherited umask' || return 1
+  assert_protocol_resolver_count 175
+}
+
 test_firewall_rule_cleanup_is_idempotent() {
   setup_ready_daemon_fixture
   printf '%s\n' strict > "$MODULE_DIR/state/dns-mode.state"
@@ -3843,6 +3955,12 @@ run_case 'protocol status rejects counts after daemon crash and failed replaceme
 run_case 'protocol status count writer refuses a symlink destination' test_protocol_status_count_writer_rejects_symlink
 run_case 'protocol status count writer refuses an unsafe temporary file' test_protocol_status_count_writer_rejects_unsafe_temp
 run_case 'protocol status rejects symlinked service logs' test_protocol_status_rejects_unsafe_service_log
+run_case 'runtime repairs private control files under permissive inherited umask' test_runtime_private_umask_repairs_existing_service_log
+run_case 'runtime private umask protects fresh boot files' test_runtime_private_umask_fresh_files
+run_case 'runtime private normalization preserves trusted file contents' test_runtime_private_normalization_trusted_files
+run_case 'runtime private normalization rejects untrusted file identities' test_runtime_private_normalization_rejects_untrusted_paths
+run_case 'runtime private normalization rejects untrusted parent directories' test_runtime_private_normalization_rejects_parent
+run_case 'runtime private normalization does not relax resolver trust' test_runtime_private_resolver_trust_still_rejects_unsafe_mode
 run_case 'IPv4 and IPv6 firewall cleanup is idempotent' test_firewall_rule_cleanup_is_idempotent
 run_case 'unproven same-name firewall chains are preserved' test_foreign_same_name_firewall_chains_are_never_claimed
 run_case 'lifecycle lock waits are bounded and shutdown blocks firewall commits' test_lifecycle_lock_wait_and_shutdown_interlock
